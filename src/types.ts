@@ -52,6 +52,8 @@ export interface HourlyData {
   windDirection80m?: number[];
   windGusts10m?: number[];
   uvIndex?: number[];
+  cape?: number[];
+  liftedIndex?: number[];
 }
 
 export interface DailyData {
@@ -192,6 +194,10 @@ export interface WeatherResponse {
   cloudTrajectory?: CloudTrajectoryAnalysis;
   locationName?: string;
   regionalScanPoints?: RegionalScanPoint[];
+  minutePrecipitation?: MinutePrecipitationPoint[];
+  convectiveSounding?: ConvectiveSounding;
+  lightningStrikes?: LightningStrike[];
+  activeHazards?: HazardAlert[];
 }
 
 export interface WeatherCondition {
@@ -250,6 +256,8 @@ export interface StormRisk {
   pressureTrend?: 'Rapid Drop' | 'Slight Fall' | 'Steady' | 'Rising';
   capeJkg?: number;
   capeLevel?: 'Stable' | 'Moderate' | 'High Instability' | 'Severe Convective';
+  convectiveSounding?: ConvectiveSounding;
+  activeHazards?: HazardAlert[];
 }
 
 export interface StormProbability {
@@ -335,6 +343,42 @@ export interface RadarMapsResponse {
   };
 }
 
+export interface RainCellVector {
+  originBearingDeg: number; // e.g. 225° (FROM where it is blowing)
+  originCardinal: string; // e.g. "SW"
+  headingDeg: number; // e.g. 45° (TOWARDS where it is moving)
+  headingCardinal: string; // e.g. "NE"
+  speedKmH: number; // e.g. 35 km/h
+  speedX: number; // Eastward velocity in km/h
+  speedY: number; // Northward velocity in km/h
+  movementSummary: string; // "Moving FROM SW (225°) TOWARDS NE (45°) at 35 km/h"
+}
+
+export interface RainCellTrajectory {
+  isCollisionCourse: boolean;
+  isOverhead: boolean;
+  isMovingAway: boolean;
+  missDistanceKm: number; // Minimum distance to user along current track
+  impactEtaMinutes: number | null; // ETA in minutes if approaching
+  relativeMotionText: string; // Human readable description of track vs user
+}
+
+export interface ActivatingRainCell {
+  cellId: string;
+  cellName: string;
+  lat: number;
+  lon: number;
+  distanceKm: number;
+  bearingDeg: number;
+  directionLabel: string; // e.g. "28 km SW"
+  precipMmH: number;
+  intensityDbz: number;
+  capeJkg: number;
+  weatherCode: number;
+  vector: RainCellVector;
+  trajectory: RainCellTrajectory;
+}
+
 export interface StormCellDetails {
   hasActiveCell: boolean;
   distanceKm: number;
@@ -347,6 +391,9 @@ export interface StormCellDetails {
   precipMmH?: number;
   weatherCode?: number;
   isHeadingTowardsUser?: boolean;
+  capeJkg?: number;
+  activatingCell?: ActivatingRainCell;
+  allDetectedCells?: ActivatingRainCell[];
 }
 
 export interface StormPredictionResponse {
@@ -367,10 +414,81 @@ export interface StormPredictionResponse {
     speedY: number;
     estimatedSpeedKmH: number;
     directionName: string;
+    originBearingDeg?: number;
+    headingDeg?: number;
+    headingCardinal?: string;
   };
 }
 
 export type OverlayMode = 'map' | 'radar' | 'arrows' | 'all';
+
+export interface HazardAlert {
+  id: string;
+  type: 'convective_storm' | 'tornado_rotation' | 'gale_wind' | 'flash_flood' | 'lightning_strike' | 'hail' | 'freeze' | 'extreme_heat';
+  severity: 'ADVISORY' | 'WATCH' | 'WARNING' | 'EMERGENCY';
+  title: string;
+  headline: string;
+  description: string;
+  onsetMinutes: number;
+  peakIntensity: string;
+  icon: string;
+  actionChecklist: string[];
+  activatingCell?: ActivatingRainCell;
+  cellLocation?: {
+    lat: number;
+    lon: number;
+    distanceKm: number;
+    bearingDeg: number;
+    directionLabel?: string;
+    capeJkg?: number;
+    intensityDbz?: number;
+    headingDeg?: number;
+    headingCardinal?: string;
+    speedKmH?: number;
+  };
+}
+
+export interface LightningStrike {
+  id: string;
+  lat: number;
+  lon: number;
+  timestamp: number;
+  ageMinutes: number;
+  distanceKm: number;
+  bearingDeg: number;
+  polarity: '+' | '-';
+  currentKa: number;
+}
+
+export interface ConvectiveSounding {
+  capeJkg: number;
+  cinJkg: number;
+  liftedIndex: number;
+  kIndex: number;
+  bulkShear06kmMs: number;
+  freezingLevelMeters: number;
+  dewPointDepressionC: number;
+  convectiveRiskCategory: 'None' | 'Marginal' | 'Slight' | 'Enhanced' | 'Moderate' | 'High';
+}
+
+export interface MinutePrecipitationPoint {
+  minute: number;
+  timeStr: string;
+  intensityMmH: number;
+  probability: number;
+  category: 'none' | 'light' | 'moderate' | 'heavy' | 'torrential';
+}
+
+export interface SavedBookmarkLocation {
+  id: string;
+  name: string;
+  country: string;
+  lat: number;
+  lon: number;
+  isHome?: boolean;
+  lastRiskScore?: number;
+  lastRiskCategory?: string;
+}
 
 export interface AppSettings {
   enableAlerts: boolean;
@@ -380,6 +498,12 @@ export interface AppSettings {
   lastCheckedTime?: string;
   selectedCity?: string;
   language?: 'auto' | 'de' | 'en' | 'it' | 'es' | 'fr';
+  enableAudioSiren?: boolean;
+  sirenVolume?: number;
+  sirenTone?: 'eas_emergency' | 'pulsing_siren' | 'marine_horn' | 'radar_chime';
+  enableWebNotifications?: boolean;
+  enableVibration?: boolean;
+  savedLocations?: SavedBookmarkLocation[];
 }
 
 export interface CityLocation {

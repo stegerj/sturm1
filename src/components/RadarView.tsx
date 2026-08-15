@@ -6,6 +6,7 @@ import {
   RotateCcw,
   Layers,
   Compass,
+  Crosshair,
   Zap,
   Info,
   Radio,
@@ -19,7 +20,9 @@ import {
   ShieldCheck,
   RefreshCw,
   Eye,
-  Map as MapIcon
+  Map as MapIcon,
+  Navigation,
+  Activity
 } from 'lucide-react';
 import {
   WeatherResponse,
@@ -40,11 +43,12 @@ interface RadarViewProps {
   stormRisk?: StormRisk | null;
   onSelectLocation?: (lat: number, lon: number, locationName: string) => void;
   settings?: AppSettings;
+  focusCoordinates?: { lat: number; lon: number; label?: string } | null;
 }
 
 type MapTheme = 'dark' | 'streets' | 'satellite';
 
-export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: initialPrediction, stormRisk, onSelectLocation, settings }) => {
+export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: initialPrediction, stormRisk, onSelectLocation, settings, focusCoordinates }) => {
   const currentLang = getCurrentLanguage(settings?.language);
   const [radarMaps, setRadarMaps] = useState<RadarMapsResponse | null>(null);
   const [frames, setFrames] = useState<RadarFrame[]>([]);
@@ -54,9 +58,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
   const [prediction, setPrediction] = useState<StormPredictionResponse | null>(initialPrediction);
   const [loadingRadar, setLoadingRadar] = useState(true);
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
-  const [radarLayerType, setRadarLayerType] = useState<'radar' | 'satellite-ir' | 'satellite-vis' | 'cloud-model'>('radar');
-  const [satelliteProvider, setSatelliteProvider] = useState<'eumetsat_15m' | 'nasa_gibs'>('eumetsat_15m');
-  const [cloudSubMode, setCloudSubMode] = useState<'clean_mask' | 'cloud_top_height' | 'nasa_deck'>('clean_mask');
+  const [radarLayerType, setRadarLayerType] = useState<'radar' | 'satellite-vis'>('radar');
   const [viewMode, setViewMode] = useState<'interactive' | 'tiles' | 'forecast'>('interactive');
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [showRangeRings, setShowRangeRings] = useState<boolean>(true);
@@ -71,7 +73,6 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
   const [showMapLabels, setShowMapLabels] = useState<boolean>(true);
   const [showWindVectors, setShowWindVectors] = useState<boolean>(false);
   const [showLightningOverlay, setShowLightningOverlay] = useState<boolean>(true);
-  const [showCloudGridMesh, setShowCloudGridMesh] = useState<boolean>(false);
   const [showCloudTrajectory, setShowCloudTrajectory] = useState<boolean>(true);
 
   // Lighthouse State
@@ -83,6 +84,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
+  const lastCenterRef = useRef<{ lat: number; lon: number } | null>(null);
   const radarTileLayerRef = useRef<L.TileLayer | null>(null);
   const baseTileLayerRef = useRef<L.TileLayer | null>(null);
   const labelsTileLayerRef = useRef<L.TileLayer | null>(null);
@@ -94,7 +96,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
   const lon = weatherData?.longitude ?? 10.7522;
   const locationName = weatherData?.locationName || `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`;
 
-  // Fetch RainViewer radar maps
+  // Fetch RainViewer radar maps (high-refresh past, now, and future nowcast frames)
   const loadRadarData = async () => {
     try {
       setLoadingRadar(true);
@@ -102,13 +104,9 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
       setRadarMaps(maps);
 
       const allFrames: RadarFrame[] = [];
-      if (radarLayerType === 'satellite-ir' && maps.satellite?.infrared && maps.satellite.infrared.length > 0) {
-        allFrames.push(...maps.satellite.infrared);
-      } else {
-        if (maps.radar?.past) allFrames.push(...maps.radar.past);
-        if (maps.radar?.now) allFrames.push(maps.radar.now);
-        if (maps.radar?.future) allFrames.push(...maps.radar.future);
-      }
+      if (maps.radar?.past) allFrames.push(...maps.radar.past);
+      if (maps.radar?.now) allFrames.push(maps.radar.now);
+      if (maps.radar?.future) allFrames.push(...maps.radar.future);
 
       if (allFrames.length > 0) {
         setFrames(allFrames);
@@ -133,22 +131,18 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
     loadRadarData();
   }, [weatherData]);
 
-  // Switch frames on radar or satellite layer change
+  // Keep all high-frequency radar frames synchronized
   useEffect(() => {
     if (!radarMaps) return;
     const newFrames: RadarFrame[] = [];
-    if (radarLayerType === 'satellite-ir' && radarMaps.satellite?.infrared && radarMaps.satellite.infrared.length > 0) {
-      newFrames.push(...radarMaps.satellite.infrared);
-    } else {
-      if (radarMaps.radar?.past) newFrames.push(...radarMaps.radar.past);
-      if (radarMaps.radar?.now) newFrames.push(radarMaps.radar.now);
-      if (radarMaps.radar?.future) newFrames.push(...radarMaps.radar.future);
-    }
+    if (radarMaps.radar?.past) newFrames.push(...radarMaps.radar.past);
+    if (radarMaps.radar?.now) newFrames.push(radarMaps.radar.now);
+    if (radarMaps.radar?.future) newFrames.push(...radarMaps.radar.future);
     if (newFrames.length > 0) {
       setFrames(newFrames);
       setCurrentFrameIndex(newFrames.length - 1);
     }
-  }, [radarLayerType, radarMaps]);
+  }, [radarMaps]);
 
   // Animation Loop
   useEffect(() => {
@@ -166,18 +160,26 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
   useEffect(() => {
     if (viewMode !== 'interactive' || !mapContainerRef.current) return;
 
-    if (!mapInstanceRef.current) {
-      const map = L.map(mapContainerRef.current, {
+    let map = mapInstanceRef.current;
+    if (!map) {
+      map = L.map(mapContainerRef.current, {
         center: [lat, lon],
-        zoom: 7,
+        zoom: currentZoom || 7,
+        minZoom: 3,
+        maxZoom: 18,
         zoomControl: false,
         attributionControl: false
       });
       mapInstanceRef.current = map;
+      lastCenterRef.current = { lat, lon };
+    } else {
+      // Only pan if coordinates actually changed from previous location
+      const prev = lastCenterRef.current;
+      if (!prev || Math.abs(prev.lat - lat) > 0.0001 || Math.abs(prev.lon - lon) > 0.0001) {
+        map.panTo([lat, lon]);
+        lastCenterRef.current = { lat, lon };
+      }
     }
-
-    const map = mapInstanceRef.current;
-    map.setView([lat, lon]);
 
     // Base Map Layer
     if (baseTileLayerRef.current) {
@@ -191,7 +193,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
       tileUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
     }
 
-    const baseLayer = L.tileLayer(tileUrl, { maxZoom: 18 });
+    const baseLayer = L.tileLayer(tileUrl, { maxZoom: 18, minZoom: 3 });
     baseLayer.addTo(map);
     baseTileLayerRef.current = baseLayer;
 
@@ -208,6 +210,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
       }
       const labelsLayer = L.tileLayer(labelsUrl, {
         maxZoom: 18,
+        minZoom: 3,
         zIndex: 250,
         opacity: 0.95
       });
@@ -245,19 +248,37 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
     };
 
     map.on('zoomend', handleZoom);
-    map.on('zoom', handleZoom);
-    setCurrentZoom(map.getZoom());
 
-    // Trigger map resize fix
+    // Watch container size changes
+    const resizeObserver = new ResizeObserver(() => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.invalidateSize();
+      }
+    });
+
+    if (mapContainerRef.current) {
+      resizeObserver.observe(mapContainerRef.current);
+    }
+
     setTimeout(() => {
       map.invalidateSize();
-    }, 200);
+    }, 150);
 
     return () => {
+      resizeObserver.disconnect();
       map.off('zoomend', handleZoom);
-      map.off('zoom', handleZoom);
     };
   }, [lat, lon, mapTheme, locationName, viewMode, showMapLabels]);
+
+  // Smoothly Fly to focused coordinates (e.g. Convective Cell from Hazard Alert)
+  useEffect(() => {
+    if (focusCoordinates && mapInstanceRef.current && focusCoordinates.lat && focusCoordinates.lon) {
+      mapInstanceRef.current.flyTo([focusCoordinates.lat, focusCoordinates.lon], 9, {
+        animate: true,
+        duration: 1.2
+      });
+    }
+  }, [focusCoordinates]);
 
   // Update Radar / Satellite Tile Overlay Layer
   useEffect(() => {
@@ -281,87 +302,14 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
     const gibsPrimaryDate = yesterdayStr;
 
     let isGibsLayer = false;
-    let maxNativeZoom = 12;
+    let maxNativeZoom = 7;
 
     if (radarLayerType === 'satellite-vis') {
-      if (satelliteProvider === 'eumetsat_15m') {
-        // Real-Time 15-Minute EUMETSAT Meteosat Satellite Feed for Nowcasting
-        const eumetsatLayer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
-          layers: 'msg_fes:ir108',
-          format: 'image/png',
-          transparent: true,
-          version: '1.3.0',
-          opacity: radarOpacity * 0.75,
-          zIndex: 100,
-          maxZoom: 18,
-          attribution: 'EUMETSAT / Meteosat 15-Min Real-Time Satellite Feed'
-        });
-        eumetsatLayer.addTo(map);
-        radarTileLayerRef.current = eumetsatLayer as any;
-        return;
-      } else {
-        // Static Daily LEO Snapshot (NASA Earthdata VIIRS Optical 250m)
-        tileUrl = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${gibsPrimaryDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`;
-        layerOpacity = radarOpacity * 0.75;
-        isGibsLayer = true;
-        maxNativeZoom = 9;
-      }
-    } else if (radarLayerType === 'satellite-ir' || (radarLayerType as string) === 'satellite') {
-      if (satelliteProvider === 'eumetsat_15m') {
-        // European Space Agency / EUMETSAT Meteosat 15-Minute Real-Time Infrared Satellite WMS
-        const eumetsatLayer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
-          layers: 'msg_fes:ir108',
-          format: 'image/png',
-          transparent: true,
-          version: '1.3.0',
-          opacity: radarOpacity * 0.75,
-          zIndex: 100,
-          maxZoom: 18,
-          attribution: 'EUMETSAT / Meteosat SEVIRI 15-Min Real-Time Infrared'
-        });
-        eumetsatLayer.addTo(map);
-        radarTileLayerRef.current = eumetsatLayer as any;
-        return;
-      } else {
-        const currentFrame = frames[currentFrameIndex];
-        if (radarMaps?.satellite?.infrared && radarMaps.satellite.infrared.length > 0 && currentFrame?.path) {
-          tileUrl = `${host}${currentFrame.path}/256/{z}/{x}/{y}/0/0_0.png`;
-          layerOpacity = radarOpacity * 0.75;
-          maxNativeZoom = 12;
-        } else {
-          // Static Daily LEO Snapshot (NASA VIIRS Thermal Infrared)
-          tileUrl = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_Brightness_Temp_BandI5_Day/default/${gibsPrimaryDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png`;
-          layerOpacity = radarOpacity * 0.70;
-          isGibsLayer = true;
-          maxNativeZoom = 9;
-        }
-      }
-    } else if (radarLayerType === 'cloud-model') {
-      if (cloudSubMode === 'clean_mask' || (satelliteProvider === 'eumetsat_15m' && cloudSubMode !== 'nasa_deck')) {
-        const wmsLayer = cloudSubMode === 'cloud_top_height' ? 'msg_fes:cth' : 'msg_fes:clm';
-        // European Space Agency / EUMETSAT 15-Minute Real-Time Clean Cloud Mask WMS
-        const eumetsatCloudLayer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
-          layers: wmsLayer,
-          format: 'image/png',
-          transparent: true,
-          version: '1.3.0',
-          opacity: cloudSubMode === 'cloud_top_height' ? radarOpacity * 0.60 : radarOpacity * 0.50,
-          zIndex: 100,
-          maxZoom: 18,
-          attribution: wmsLayer === 'msg_fes:cth'
-            ? 'EUMETSAT / Meteosat 15-Min Cloud Top Height'
-            : 'EUMETSAT / Meteosat 15-Min Clean Cloud Mask'
-        });
-        eumetsatCloudLayer.addTo(map);
-        radarTileLayerRef.current = eumetsatCloudLayer as any;
-        return;
-      } else {
-        // Atmospheric Cloud Top Pressure & Cloud Altitude Deck Layer (NASA MODIS)
-        tileUrl = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_Cloud_Top_Pressure_Day/default/${gibsPrimaryDate}/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`;
-        layerOpacity = radarOpacity * 0.45;
-        isGibsLayer = true;
-        maxNativeZoom = 6;
-      }
+      // NASA Earthdata VIIRS Optical 250m TrueColor (Daily LEO Snapshot)
+      tileUrl = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${gibsPrimaryDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`;
+      layerOpacity = radarOpacity * 0.85;
+      isGibsLayer = true;
+      maxNativeZoom = 8;
     } else if (radarLayerType === 'radar') {
       const currentFrame = frames[currentFrameIndex];
       if (currentFrame?.path) {
@@ -391,7 +339,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
             zIndex: 100,
             tileSize: activeTileSize,
             zoomOffset: 0,
-            maxNativeZoom: 12,
+            maxNativeZoom: 7,
             maxZoom: 18,
             attribution: useArpaeDpc
               ? 'DPC Italy / ARPAE Doppler Radar Network (Lazio / Italy)'
@@ -399,7 +347,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
               ? 'DWD Europe 1km Composite Doppler Radar'
               : useNexrad
               ? 'US NEXRAD Doppler Radar'
-              : 'RainViewer HD Doppler Radar'
+              : 'RainViewer HD Doppler Radar (5-10m High-Refresh)'
           });
 
           radarLayer.addTo(map);
@@ -422,11 +370,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
         maxZoom: 18,
         attribution: radarLayerType === 'satellite-vis'
           ? 'NASA Earthdata GIBS / VIIRS Optical Satellite'
-          : radarLayerType.startsWith('satellite-ir')
-          ? 'NASA GIBS / VIIRS SNPP Infrared Satellite'
-          : radarLayerType === 'cloud-model'
-          ? 'NASA Earthdata / MODIS Cloud Pressure Deck'
-          : 'RainViewer / Weather Satellite'
+          : 'High-Refresh Doppler Rain Radar'
       });
 
       radarLayer.addTo(map);
@@ -439,7 +383,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
         radarTileLayerRef.current = null;
       }
     };
-  }, [frames, currentFrameIndex, radarOpacity, radarMaps, viewMode, tileSize, smoothRadar, colorScheme, radarLayerType, satelliteProvider, cloudSubMode, currentZoom, highResRadarProvider, lat, lon]);
+  }, [frames, currentFrameIndex, radarOpacity, radarMaps, viewMode, tileSize, smoothRadar, colorScheme, radarLayerType, highResRadarProvider, lat, lon]);
 
   // Draw Distance Range Rings, Motion Vector & Cloud Model Overlay
   useEffect(() => {
@@ -453,123 +397,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
 
     const group = L.layerGroup();
 
-    // If Cloud Model overlay is active, render regional Lat/Lon grid mesh & altitude deck rings
-    if (radarLayerType === 'cloud-model' && weatherData) {
-      const current = weatherData.current;
-      const hourly = weatherData.hourly;
-      const totalCloud = current?.cloudCover ?? hourly?.cloudCover?.[0] ?? 50;
-      const lowCloud = current?.cloudCoverLow ?? hourly?.cloudCoverLow?.[0] ?? Math.round(totalCloud * 0.4);
-      const midCloud = current?.cloudCoverMid ?? hourly?.cloudCoverMid?.[0] ?? Math.round(totalCloud * 0.3);
-      const highCloud = current?.cloudCoverHigh ?? hourly?.cloudCoverHigh?.[0] ?? Math.round(totalCloud * 0.3);
-
-      // Render 5x5 Regional Grid Mesh (approx 20km x 20km per cell) ONLY if explicitly enabled
-      if (showCloudGridMesh) {
-        const gridSize = 0.2; // ~22km
-        for (let i = -2; i <= 2; i++) {
-          for (let j = -2; j <= 2; j++) {
-            const cellMinLat = lat + i * gridSize;
-            const cellMaxLat = lat + (i + 1) * gridSize;
-            const cellMinLon = lon + j * gridSize;
-            const cellMaxLon = lon + (j + 1) * gridSize;
-
-            // Pseudo-spatial variation around the center point
-            const distFactor = Math.sqrt(i * i + j * j);
-            const cellCloudCover = Math.min(100, Math.max(0, Math.round(totalCloud + Math.sin(i * 1.5 + j) * 12 - distFactor * 3)));
-            const cellLow = Math.round(cellCloudCover * (lowCloud / (totalCloud || 1)));
-            const cellMid = Math.round(cellCloudCover * (midCloud / (totalCloud || 1)));
-            const cellHigh = Math.round(cellCloudCover * (highCloud / (totalCloud || 1)));
-
-            const isCenter = i === 0 && j === 0;
-
-            const rect = L.rectangle([[cellMinLat, cellMinLon], [cellMaxLat, cellMaxLon]], {
-              color: isCenter ? '#38bdf8' : '#38bdf8',
-              weight: isCenter ? 1.5 : 0.75,
-              opacity: isCenter ? 0.6 : 0.25,
-              dashArray: isCenter ? undefined : '3, 3',
-              fillColor: cellCloudCover > 60 ? '#818cf8' : cellCloudCover > 30 ? '#38bdf8' : '#0ea5e9',
-              fillOpacity: (cellCloudCover / 100) * 0.12
-            });
-
-            const centerLat = (cellMinLat + cellMaxLat) / 2;
-            const centerLon = (cellMinLon + cellMaxLon) / 2;
-
-            rect.bindTooltip(
-              `<div class="text-xs p-1 font-sans">` +
-              `<div class="font-bold text-sky-300">🌫️ Grid Cell (${centerLat.toFixed(2)}°, ${centerLon.toFixed(2)}°)</div>` +
-              `<div class="text-white font-semibold">Total Cloud Cover: <b>${cellCloudCover}%</b></div>` +
-              `<div class="text-slate-300 text-[11px] mt-0.5">` +
-              `Low Deck: <span class="text-sky-300 font-mono">${cellLow}%</span> | ` +
-              `Mid: <span class="text-amber-300 font-mono">${cellMid}%</span> | ` +
-              `High: <span class="text-purple-300 font-mono">${cellHigh}%</span>` +
-              `</div>` +
-              `</div>`,
-              { permanent: false, direction: 'center', opacity: 0.95 }
-            );
-
-            group.addLayer(rect);
-          }
-        }
-
-        // Outer High Cloud Ring
-        const highRing = L.circle([lat, lon], {
-          radius: 65000,
-          color: '#a855f7',
-          weight: 1.2,
-          opacity: 0.5,
-          fillColor: '#c084fc',
-          fillOpacity: (highCloud / 100) * 0.06,
-          dashArray: '4, 4'
-        });
-        highRing.bindTooltip(`☁️ High Cloud Deck (>6,000m): ${highCloud}% (Cirrus Veils)`, { permanent: false, direction: 'top' });
-        group.addLayer(highRing);
-
-        // Mid Cloud Ring
-        const midRing = L.circle([lat, lon], {
-          radius: 35000,
-          color: '#f59e0b',
-          weight: 1.2,
-          opacity: 0.5,
-          fillColor: '#fbbf24',
-          fillOpacity: (midCloud / 100) * 0.08,
-          dashArray: '4, 4'
-        });
-        midRing.bindTooltip(`☁️ Mid Cloud Deck (2,000-6,000m): ${midCloud}% (Altocumulus Deck)`, { permanent: false, direction: 'right' });
-        group.addLayer(midRing);
-
-        // Low Cloud Ring
-        const lowRing = L.circle([lat, lon], {
-          radius: 15000,
-          color: '#0284c7',
-          weight: 1.5,
-          opacity: 0.6,
-          fillColor: '#38bdf8',
-          fillOpacity: (lowCloud / 100) * 0.1
-        });
-        lowRing.bindTooltip(`☁️ Low Cloud Deck (<2,000m): ${lowCloud}% (Stratus/Fog/Cumulus)`, { permanent: false, direction: 'left' });
-        group.addLayer(lowRing);
-      }
-
-      // Center Location Marker with Cloud Ceiling & Total Coverage
-      const temp = current?.temperature ?? 15;
-      const dewPoint = hourly?.dewPoint?.[0] ?? (temp - 5);
-      const cloudCeilingMeters = Math.round(Math.max(0, temp - dewPoint) * 125);
-      const cloudCeilingFeet = Math.round(cloudCeilingMeters * 3.28084);
-
-      const centerMarker = L.circleMarker([lat, lon], {
-        radius: 8,
-        color: '#ffffff',
-        fillColor: '#38bdf8',
-        fillOpacity: 1,
-        weight: 2.5
-      });
-      centerMarker.bindTooltip(
-        `📍 <b>${locationName}</b><br/>Sky Cover: <b>${totalCloud}%</b> | Est. Base: <b>~${cloudCeilingMeters}m (${cloudCeilingFeet}ft)</b>`,
-        { permanent: true, direction: 'bottom', className: 'cloud-center-tooltip' }
-      );
-      group.addLayer(centerMarker);
-    }
-
-    if (showRangeRings && radarLayerType !== 'cloud-model') {
+    if (showRangeRings) {
       const ring25 = L.circle([lat, lon], {
         radius: 25000,
         color: '#38bdf8',
@@ -624,76 +452,218 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
         const cellLon = cell.lon;
         const cellDist = Math.round(cell.distanceKm || 0);
         const cellPrecip = cell.precipMmH || 0;
+        const capeVal = cell.capeJkg || weatherData?.convectiveSounding?.capeJkg || stormRisk?.capeJkg || 0;
+        const isSevereConvective = (capeVal >= 1000 && (cellPrecip >= 2.0 || cell.intensityDbz >= 40)) || ((weatherData?.currentWeather?.weatherCode ?? 0) >= 95);
+        const headingDeg = vector.headingDeg ?? ((Math.atan2(speedX, speedY) * 180) / Math.PI + 360) % 360;
+        const originDeg = vector.originBearingDeg ?? (headingDeg + 180) % 360;
+        const cellActivating = cell.activatingCell;
+        const originCard = cellActivating?.vector?.originCardinal || (originDeg >= 180 && originDeg < 270 ? 'SW' : 'W');
+        const headingCard = vector.headingCardinal || vector.directionName;
 
-        // 1-Hour Projected Cell Center
-        const targetLat = cellLat + speedY / 111;
-        const targetLon = cellLon + speedX / (111 * Math.cos((cellLat * Math.PI) / 180));
+        // 30m, 1-Hour & 2-Hour Projected Cell Centers
+        const targetLat30m = cellLat + (speedY * 0.5) / 111;
+        const targetLon30m = cellLon + (speedX * 0.5) / (111 * Math.cos((cellLat * Math.PI) / 180));
+        const targetLat1h = cellLat + speedY / 111;
+        const targetLon1h = cellLon + speedX / (111 * Math.cos((cellLat * Math.PI) / 180));
+        const targetLat2h = cellLat + (speedY * 2) / 111;
+        const targetLon2h = cellLon + (speedX * 2) / (111 * Math.cos((cellLat * Math.PI) / 180));
 
-        const isHeavy = cellPrecip >= 2.5 || cell.intensityDbz >= 35;
-        const lineColor = isHeavy ? '#ef4444' : '#f59e0b';
+        const lineColor = isSevereConvective ? '#ef4444' : '#f59e0b';
 
-        // 1. Storm/Rain Cell Origin Marker
+        // 0. Convective Warning Threat Polygon / Core Area
+        if (isSevereConvective) {
+          const coreRadiusMeters = Math.max(6000, Math.min(18000, capeVal * 6));
+          const convectiveThreatCircle = L.circle([cellLat, cellLon], {
+            radius: coreRadiusMeters,
+            color: '#ef4444',
+            weight: 2,
+            dashArray: '6, 6',
+            fillColor: '#dc2626',
+            fillOpacity: 0.16
+          });
+          convectiveThreatCircle.bindTooltip(
+            `<div class="text-xs p-1">` +
+            `<div class="font-black text-red-400">⚡ Severe Convective Core Threat Envelope</div>` +
+            `<div class="text-white font-bold">CAPE: ${capeVal} J/kg • ${cell.intensityDbz} dBZ</div>` +
+            `<div class="text-amber-300 font-mono text-[11px]">Heading: ${vector.directionName} (${Math.round(headingDeg)}°) @ ${vector.estimatedSpeedKmH} km/h</div>` +
+            `</div>`,
+            { permanent: false }
+          );
+          group.addLayer(convectiveThreatCircle);
+        }
+
+        // 1. Severe Convective Cell Marker
         const cellIcon = L.divIcon({
-          className: 'active-cell-marker',
-          html: `<div class="relative flex items-center justify-center">
-            <span class="animate-ping absolute inline-flex h-6 w-6 rounded-full ${isHeavy ? 'bg-red-400' : 'bg-amber-400'} opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-4 w-4 ${isHeavy ? 'bg-red-500' : 'bg-amber-500'} border-2 border-white shadow-lg"></span>
-          </div>`,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12]
+          className: 'active-convective-cell-marker',
+          html: `
+            <div class="relative flex items-center justify-center cursor-pointer group">
+              <span class="animate-ping absolute inline-flex h-12 w-12 rounded-full ${isSevereConvective ? 'bg-red-500' : 'bg-amber-400'} opacity-75"></span>
+              <span class="animate-pulse absolute inline-flex h-8 w-8 rounded-full ${isSevereConvective ? 'bg-amber-400' : 'bg-yellow-300'} opacity-60"></span>
+              <div class="relative flex items-center justify-center w-8 h-8 rounded-full ${isSevereConvective ? 'bg-red-600' : 'bg-amber-500'} border-2 border-white shadow-2xl text-white font-black text-sm">
+                ${isSevereConvective ? '⚡' : '🌧️'}
+              </div>
+              <div class="absolute -bottom-6 whitespace-nowrap bg-slate-950/95 text-amber-300 border border-amber-500/80 text-[10px] font-black px-2 py-0.5 rounded-full shadow-2xl flex items-center gap-1 backdrop-blur-md">
+                <span>⚡ CAPE ${capeVal} J/kg • ${vector.directionName}</span>
+              </div>
+            </div>
+          `,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
         });
 
         const originMarker = L.marker([cellLat, cellLon], { icon: cellIcon });
+        
+        // Detailed Interactive Popup on Cell Click
+        const cellPopupHtml = `
+          <div style="font-family: system-ui, -apple-system, sans-serif; color: #0f172a; min-width: 250px; padding: 2px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
+              <span style="font-size: 10px; font-weight: 800; background: ${isSevereConvective ? '#fee2e2' : '#fef3c7'}; color: ${isSevereConvective ? '#991b1b' : '#92400e'}; padding: 2px 8px; border-radius: 9999px; text-transform: uppercase;">
+                ${isSevereConvective ? '🚨 Activating Convective Cell' : '🌧️ Rain Cell Core'}
+              </span>
+              <span style="font-size: 11px; font-weight: 700; color: #0284c7;">
+                ${cellDist === 0 ? 'Overhead' : `${cellDist} km away`}
+              </span>
+            </div>
+
+            <h4 style="margin: 0 0 2px 0; font-size: 15px; font-weight: 800; color: #0f172a;">
+              ⚡ ${cellActivating?.cellName || cell.cellOriginName || 'Rain Cell Core'}
+            </h4>
+            <div style="font-size: 11px; color: #475569; margin-bottom: 8px; font-family: monospace;">
+              📍 Coordinates: <b>${cellLat.toFixed(4)}°N, ${cellLon.toFixed(4)}°E</b>
+            </div>
+
+            <div style="background: #0f172a; color: #f8fafc; padding: 8px; border-radius: 8px; font-size: 11px; margin-bottom: 8px;">
+              <div style="font-weight: 800; color: #38bdf8; margin-bottom: 2px;">🧭 Vector Direction:</div>
+              <div>FROM <b>${originCard} (${Math.round(originDeg)}°)</b> ➔ TOWARDS <b>${headingCard} (${Math.round(headingDeg)}°)</b></div>
+              <div style="color: #94a3b8; font-size: 10.5px; margin-top: 2px;">Velocity: <b style="color: #facc15;">${vector.estimatedSpeedKmH} km/h</b></div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #f8fafc; padding: 6px 8px; border-radius: 8px; font-size: 10.5px; margin-bottom: 8px; border: 1px solid #e2e8f0;">
+              <div><strong>CAPE:</strong> <span style="color: #dc2626; font-weight: 800;">${capeVal} J/kg</span></div>
+              <div><strong>Reflectivity:</strong> ${cell.intensityDbz} dBZ</div>
+              <div><strong>Precip Rate:</strong> ${cellPrecip.toFixed(1)} mm/h</div>
+              <div><strong>Trajectory:</strong> <span style="color: ${cell.isHeadingTowardsUser ? '#dc2626' : '#0284c7'}; font-weight: 700;">${cell.isHeadingTowardsUser ? '⚠️ Approaching' : '➡️ Passing'}</span></div>
+            </div>
+
+            <p style="font-size: 10.5px; color: #334155; line-height: 1.35; margin: 0;">
+              ${cell.cellStatusText || 'Extreme convective updraft velocity detected in atmospheric sounding.'}
+            </p>
+          </div>
+        `;
+
+        originMarker.bindPopup(cellPopupHtml);
         originMarker.bindTooltip(
-          `🌧️ <b>Active Cell Origin</b> (${cellPrecip.toFixed(1)} mm/h)<br/>Distance: ${cellDist} km ${cellDist === 0 ? '(Overhead)' : ''}`,
-          { permanent: true, direction: 'top' }
+          `⚡ <b>Activating Rain Cell</b> • CAPE ${capeVal} J/kg<br/>📍 <b>${cellLat.toFixed(2)}°N, ${cellLon.toFixed(2)}°E</b> (${cellDist} km ${cellDist === 0 ? 'Overhead' : 'away'})<br/>🧭 Heading ${vector.directionName} (${Math.round(headingDeg)}°) @ ${vector.estimatedSpeedKmH} km/h`,
+          { permanent: true, direction: 'top', offset: [0, -20] }
         );
         group.addLayer(originMarker);
 
-        // 2. 1-Hour Propagation Vector Polyline
+        // 2. 1-Hour & 2-Hour Propagation Vector Polyline
         const vectorLine = L.polyline(
           [
             [cellLat, cellLon],
-            [targetLat, targetLon]
+            [targetLat30m, targetLon30m],
+            [targetLat1h, targetLon1h],
+            [targetLat2h, targetLon2h]
           ],
-          { color: lineColor, weight: 4, dashArray: '8, 6' }
+          { color: lineColor, weight: 4.5, opacity: 0.95 }
         );
         vectorLine.bindTooltip(
-          `🟡 <b>Storm Vector (+1h)</b>: Moving ${vector.directionName} at ${vector.estimatedSpeedKmH} km/h`,
+          `🧭 <b>Storm Vector</b>: FROM ${originCard} (${Math.round(originDeg)}°) ➔ TOWARDS ${headingCard} (${Math.round(headingDeg)}°) @ ${vector.estimatedSpeedKmH} km/h`,
           { permanent: false, direction: 'right' }
         );
         group.addLayer(vectorLine);
 
-        // 3. Projected Vector Head
-        const vectorHead = L.circleMarker([targetLat, targetLon], {
-          radius: 7,
+        // 3. Projected Checkpoint Markers (+30m, +1h, +2h)
+        const marker30m = L.circleMarker([targetLat30m, targetLon30m], {
+          radius: 5,
           color: lineColor,
-          fillColor: '#facc15',
+          fillColor: '#fbbf24',
           fillOpacity: 0.9,
           weight: 2
         });
-        vectorHead.bindTooltip(`🟡 Projected Cell Center in 1 Hour`, { permanent: false });
-        group.addLayer(vectorHead);
+        marker30m.bindTooltip(`⏱️ <b>+30 Min</b> Projected Position`, { permanent: false });
+        group.addLayer(marker30m);
+
+        // Direction Arrow Marker (+1 Hour)
+        const arrow1hIcon = L.divIcon({
+          className: 'vector-arrowhead-icon',
+          html: `
+            <div style="transform: rotate(${headingDeg}deg);" class="flex items-center justify-center">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2L19 21L12 17L5 21L12 2Z" fill="#facc15" stroke="#0f172a" stroke-width="2"/>
+              </svg>
+            </div>
+          `,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12]
+        });
+        const arrow1hMarker = L.marker([targetLat1h, targetLon1h], { icon: arrow1hIcon });
+        arrow1hMarker.bindTooltip(`🟡 <b>+1 Hour Forecast Position</b>: Heading ${vector.directionName} (${Math.round(headingDeg)}°)`, { permanent: false });
+        group.addLayer(arrow1hMarker);
+
+        // Projected Checkpoint (+2 Hours)
+        const arrow2hIcon = L.divIcon({
+          className: 'vector-arrowhead-icon-2h',
+          html: `
+            <div style="transform: rotate(${headingDeg}deg);" class="flex items-center justify-center opacity-80">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2L19 21L12 17L5 21L12 2Z" fill="#fb923c" stroke="#0f172a" stroke-width="2"/>
+              </svg>
+            </div>
+          `,
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        });
+        const arrow2hMarker = L.marker([targetLat2h, targetLon2h], { icon: arrow2hIcon });
+        arrow2hMarker.bindTooltip(`🟠 <b>+2 Hour Forecast Position</b>`, { permanent: false });
+        group.addLayer(arrow2hMarker);
 
         // 4. Line connecting cell origin to User position (if not overhead)
-        if (cellDist > 2) {
+        if (cellDist > 1.5) {
           const userConnector = L.polyline(
             [
               [cellLat, cellLon],
               [lat, lon]
             ],
-            { color: '#a855f7', weight: 2, dashArray: '4, 4', opacity: 0.8 }
+            { color: '#a855f7', weight: 2.5, dashArray: '5, 5', opacity: 0.85 }
           );
           userConnector.bindTooltip(
-            `📍 <b>${cellDist} km</b> to your position (${cell.isHeadingTowardsUser ? 'Approaching' : 'Moving parallel'})`,
+            `📍 <b>${cellDist} km</b> from your location (${cell.isHeadingTowardsUser ? '⚠️ Approaching course' : '➡️ Passing track'})`,
             { permanent: false }
           );
           group.addLayer(userConnector);
+        }
+
+        // 5. Additional Regional Detected Rain Cells
+        if (cell.allDetectedCells && cell.allDetectedCells.length > 1) {
+          cell.allDetectedCells.forEach((otherCell) => {
+            if (otherCell.lat === cellLat && otherCell.lon === cellLon) return; // skip primary
+            const otherIcon = L.divIcon({
+              className: 'regional-detected-cell-marker',
+              html: `
+                <div class="relative flex items-center justify-center cursor-pointer">
+                  <div class="w-6 h-6 rounded-full bg-amber-600/90 border-2 border-white shadow-lg text-white font-bold text-[10px] flex items-center justify-center">
+                    🌧️
+                  </div>
+                </div>
+              `,
+              iconSize: [24, 24],
+              iconAnchor: [12, 12]
+            });
+            const otherMarker = L.marker([otherCell.lat, otherCell.lon], { icon: otherIcon });
+            otherMarker.bindTooltip(
+              `🌧️ <b>${otherCell.cellName}</b> (${otherCell.directionLabel})<br/>${otherCell.precipMmH.toFixed(1)} mm/h • ${otherCell.intensityDbz} dBZ<br/>Vector: ➔ ${otherCell.vector.headingCardinal} (${Math.round(otherCell.vector.headingDeg)}°) @ ${otherCell.vector.speedKmH} km/h`,
+              { permanent: false }
+            );
+            group.addLayer(otherMarker);
+          });
         }
       } else {
         // Ambient steering wind vector from user location
         const targetLat = lat + speedY / 111;
         const targetLon = lon + speedX / (111 * Math.cos((lat * Math.PI) / 180));
+        const headingDeg = ((Math.atan2(speedX, speedY) * 180) / Math.PI + 360) % 360;
 
         const vectorLine = L.polyline(
           [
@@ -703,7 +673,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
           { color: '#38bdf8', weight: 3, dashArray: '4, 4' }
         );
         vectorLine.bindTooltip(
-          `🩵 Steering Wind Flow: Blowing towards ${vector.directionName} at ${vector.estimatedSpeedKmH} km/h (No active storm cells in 100km)`,
+          `🩵 Steering Wind Flow: Blowing towards ${vector.directionName} (${Math.round(headingDeg)}°) at ${vector.estimatedSpeedKmH} km/h`,
           { permanent: false, direction: 'right' }
         );
         group.addLayer(vectorLine);
@@ -712,38 +682,16 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
 
     // Lightning Discharge Strikes Overlay
     if (showLightningOverlay && weatherData) {
-      const code = weatherData.current?.weatherCode ?? 0;
-      const precip = weatherData.current?.precipitation ?? 0;
-      const isThunderstorm = code === 95 || code === 96 || code === 99 || precip > 1.5;
+      const strikes = weatherData.lightningStrikes || [];
 
-      const strikePoints: { lat: number; lon: number; label: string; timeAgo: string }[] = [];
-      const points = weatherData.regionalScanPoints || [];
-
-      points.forEach((p, idx) => {
-        if (p.precipitationMmH > 0.8 || p.weatherCode >= 80) {
-          strikePoints.push({
-            lat: p.latitude + (Math.sin(idx * 2) * 0.025),
-            lon: p.longitude + (Math.cos(idx * 2) * 0.025),
-            label: `⚡ Active Strike (${p.precipitationMmH.toFixed(1)} mm/h)`,
-            timeAgo: `${Math.round(1 + idx * 1.5)}m ago`
-          });
-        }
-      });
-
-      if (strikePoints.length === 0 && isThunderstorm) {
-        strikePoints.push(
-          { lat: lat + 0.06, lon: lon + 0.04, label: '⚡ Convective Discharge (3.2 kA)', timeAgo: '1m ago' },
-          { lat: lat - 0.05, lon: lon - 0.06, label: '⚡ Cloud-to-Ground Strike (8.5 kA)', timeAgo: '3m ago' }
-        );
-      }
-
-      strikePoints.forEach((s) => {
+      strikes.forEach((s) => {
+        const isRecent = s.ageMinutes <= 5;
         const lightningIcon = L.divIcon({
           className: 'custom-lightning-icon',
           html: `
             <div class="relative flex items-center justify-center">
-              <span class="animate-ping absolute inline-flex h-6 w-6 rounded-full bg-amber-400 opacity-75"></span>
-              <div class="relative w-5 h-5 bg-amber-400 text-slate-950 rounded-full border border-white shadow-md flex items-center justify-center text-xs font-bold">
+              ${isRecent ? '<span class="animate-ping absolute inline-flex h-6 w-6 rounded-full bg-amber-400 opacity-75"></span>' : ''}
+              <div class="relative w-5 h-5 ${isRecent ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-amber-400'} rounded-full border border-white/60 shadow-md flex items-center justify-center text-xs font-bold">
                 ⚡
               </div>
             </div>
@@ -754,7 +702,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
 
         const strikeMarker = L.marker([s.lat, s.lon], { icon: lightningIcon });
         strikeMarker.bindTooltip(
-          `<div class="text-xs font-bold text-amber-300">${s.label}</div><div class="text-[10px] text-slate-300">${s.timeAgo} • MeteoGate Lightning Network</div>`,
+          `<div class="text-xs font-bold text-amber-300">⚡ Cloud-to-Ground Strike (${s.polarity}${Math.abs(s.currentKa)} kA)</div><div class="text-[10px] text-slate-300">${s.distanceKm.toFixed(1)} km away • ${s.ageMinutes}m ago • Bearing ${s.bearingDeg}°</div>`,
           { permanent: false, direction: 'top' }
         );
         group.addLayer(strikeMarker);
@@ -843,7 +791,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
 
     group.addTo(map);
     overlayGroupRef.current = group;
-  }, [lat, lon, showRangeRings, showVectorArrow, showLightningOverlay, showWindVectors, showCloudGridMesh, showCloudTrajectory, prediction, viewMode, weatherData]);
+  }, [lat, lon, showRangeRings, showVectorArrow, showLightningOverlay, showWindVectors, showCloudTrajectory, prediction, viewMode, weatherData]);
 
   // Render Lighthouses (Leuchttürme) Overlay
   useEffect(() => {
@@ -979,6 +927,12 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
     mapInstanceRef.current?.zoomOut();
   };
 
+  const handleRecenter = () => {
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.panTo([lat, lon]);
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto px-2 sm:px-4 py-6 space-y-6 mb-24">
       {/* Header & Location Banner */}
@@ -1051,38 +1005,237 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
       {/* Mode 1: Interactive Leaflet Map */}
       {viewMode === 'interactive' && (
         <div className="space-y-4">
-          {/* Cell Tracking Status Banner */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between text-xs gap-3 shadow-lg">
-            <div className="flex items-center gap-2.5 overflow-hidden">
-              <div
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  prediction?.detectedCell?.hasActiveCell ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'
-                }`}
-              />
-              <span className="font-bold text-slate-200 truncate">
-                {prediction?.detectedCell?.cellStatusText || 'No active storm or rain cells detected in 100 km radius.'}
-              </span>
-            </div>
-            <button
-              onClick={() => setShowInfoModal(true)}
-              className="text-sky-400 hover:text-sky-300 font-bold shrink-0 flex items-center gap-1 text-[11px] bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-1 rounded-lg border border-sky-500/30 transition-all cursor-pointer"
-            >
-              <Info className="w-3.5 h-3.5" />
-              <span>What is the Yellow Dot?</span>
-            </button>
-          </div>
+          {/* Tactical Convective Threat & Activating Cell Tracker (OUTSIDE the map) */}
+          {(() => {
+            const cell = prediction?.detectedCell;
+            const vector = prediction?.movementVector;
+            const hasCell = cell?.hasActiveCell;
+            const isApproaching = prediction?.stormProbability?.stormApproaching || cell?.isHeadingTowardsUser;
+            const prob = prediction?.stormProbability?.probability ?? 0;
+            const eta = prediction?.timeToStorm?.estimatedMinutes;
+            const dbz = cell?.intensityDbz ?? 0;
+            const precipRate = cell?.precipMmH ?? (weatherData?.current?.precipitation ?? 0);
+            const distKm = cell?.distanceKm;
+            const speedKmH = vector?.estimatedSpeedKmH ?? Math.round(weatherData?.currentWeather?.windSpeed ?? 18);
+            const headingDeg = vector?.headingDeg ?? (vector?.directionName ? 45 : 45);
+            const originDeg = vector?.originBearingDeg ?? ((headingDeg + 180) % 360);
+            const cellActivating = cell?.activatingCell;
+            const originCard = cellActivating?.vector?.originCardinal || (originDeg >= 180 && originDeg < 270 ? 'SW' : 'W');
+            const headingCard = vector?.headingCardinal || vector?.directionName || 'NE';
+            const cape = cell?.capeJkg || weatherData?.convectiveSounding?.capeJkg || stormRisk?.capeJkg || 0;
 
-          {/* Dedicated Radar & Layer Controls Bar (ABOVE the Map frame) */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-xl space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              {/* Map Base Themes */}
-              <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl p-1 text-xs">
-                <span className="text-[10px] text-slate-500 font-bold px-1.5 uppercase">Base Map:</span>
+            const isSevere = (hasCell && (dbz >= 45 || precipRate >= 4.0 || ((weatherData?.currentWeather?.weatherCode ?? 0) >= 95))) || ((weatherData?.currentWeather?.weatherCode ?? 0) >= 95);
+            const isWatch = hasCell && (isApproaching || prob >= 50 || (distKm ?? 100) <= 35);
+            const isAdvisory = hasCell || (distKm !== undefined && distKm < 75 && prob >= 30);
+
+            if (!hasCell && !isSevere) {
+              return (
+                <div className="bg-slate-900/90 border border-slate-800 rounded-2xl px-4 py-3 shadow-lg flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs text-slate-300">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                    <span className="font-bold text-emerald-400">Radar Scan: All Clear</span>
+                    <span className="text-slate-400 hidden sm:inline">•</span>
+                    <span className="text-slate-400">
+                      No active convective or precipitation cells detected within 100 km radius.
+                    </span>
+                    {cape >= 800 && (
+                      <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-md font-mono border border-slate-700">
+                        CAPE Aloft: {cape} J/kg (Capping Inversion Active)
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setShowInfoModal(true)}
+                    className="text-sky-400 hover:text-sky-300 text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 transition-all cursor-pointer"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                    <span>Tracking Guide</span>
+                  </button>
+                </div>
+              );
+            }
+
+            const bannerBg = isSevere
+              ? 'bg-gradient-to-r from-red-950/90 via-slate-900 to-red-950/50 border-red-500/60 shadow-red-950/40'
+              : isWatch
+              ? 'bg-gradient-to-r from-amber-950/90 via-slate-900 to-amber-950/50 border-amber-500/60 shadow-amber-950/40'
+              : 'bg-gradient-to-r from-sky-950/90 via-slate-900 to-sky-950/50 border-sky-500/50 shadow-sky-950/40';
+
+            const badgeBg = isSevere
+              ? 'bg-red-500 text-white animate-pulse'
+              : isWatch
+              ? 'bg-amber-400 text-slate-950 font-bold animate-pulse'
+              : 'bg-sky-400 text-slate-950 font-bold';
+
+            const alertTitle = isSevere
+              ? 'SEVERE THUNDERSTORM & CONVECTIVE WARNING'
+              : isWatch
+              ? 'STORM & PRECIPITATION APPROACHING'
+              : 'ACTIVE RAIN CELL DETECTED';
+
+            return (
+              <div className={`border rounded-3xl p-4 sm:p-5 shadow-2xl space-y-3.5 ${bannerBg}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+                  <div className="flex items-start sm:items-center gap-3">
+                    <span className={`px-2.5 py-1 rounded-lg text-xs uppercase tracking-wider font-extrabold shadow-sm shrink-0 ${badgeBg}`}>
+                      {isSevere ? 'Severe Alert' : isWatch ? 'Storm Watch' : 'Cell Active'}
+                    </span>
+                    <div>
+                      <h4 className="text-sm font-extrabold text-white flex items-center gap-2">
+                        <span>{alertTitle}</span>
+                      </h4>
+                      <p className="text-xs text-slate-300 font-medium mt-0.5">
+                        {cellActivating?.cellName || cell?.cellOriginName || 'Rain Cell Core'}{' '}
+                        {cell?.lat !== undefined && cell?.lon !== undefined && (
+                          <span className="font-mono text-slate-400 text-[11px]">
+                            ({cell.lat.toFixed(4)}°N, {cell.lon.toFixed(4)}°E)
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {cell?.lat !== undefined && cell?.lon !== undefined && (
+                      <button
+                        onClick={() => {
+                          if (mapInstanceRef.current && cell.lat !== undefined && cell.lon !== undefined) {
+                          mapInstanceRef.current.flyTo([cell.lat, cell.lon], 9, { animate: true, duration: 1 });
+                        }
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-red-600/30 transition-all cursor-pointer"
+                        title="Fly map directly to Convective Cell core coordinates"
+                      >
+                        <Crosshair className="w-3.5 h-3.5" />
+                        <span>Focus Cell</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => {
+                        if (mapInstanceRef.current) {
+                          mapInstanceRef.current.flyTo([lat, lon], 8, { animate: true, duration: 1 });
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
+                      title="Fly map back to user location"
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-sky-400" />
+                      <span>My Location</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowInfoModal(true)}
+                      className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-all cursor-pointer"
+                      title="Open Radar & Vector Guide"
+                    >
+                      <Info className="w-4 h-4 text-sky-400" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Structured Metrics Bar (Single clean source of truth, no duplicates) */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-2.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                      <Navigation className="w-3 h-3 text-sky-400" />
+                      Proximity & Direction
+                    </span>
+                    <div className="text-sm font-extrabold text-white mt-0.5">
+                      {distKm !== undefined ? (distKm === 0 ? 'Overhead (0 km)' : `${distKm.toFixed(1)} km ${cell?.initialBearingDeg ? `at ${cell.initialBearingDeg}°` : ''}`) : 'Monitoring'}
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      {isApproaching ? '🎯 Collision course' : '↗️ Moving parallel / away'}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-2.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-amber-400" />
+                      Impact ETA
+                    </span>
+                    <div className="text-sm font-extrabold text-amber-300 mt-0.5">
+                      {eta !== null && eta !== undefined && eta > 0
+                        ? `~${eta} min`
+                        : precipRate > 0.1 || isSevere
+                        ? 'Active Overhead'
+                        : 'No Direct Arrival'}
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      {prob > 0 ? `Threat Prob: ${prob}%` : 'Low Risk'}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-2.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                      <Compass className="w-3 h-3 text-purple-400" />
+                      Motion Vector
+                    </span>
+                    <div className="text-xs font-bold text-purple-300 mt-1 font-mono">
+                      FROM {originCard} ➔ {headingCard} ({Math.round(headingDeg)}°)
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      Velocity: <strong className="text-slate-200">{speedKmH} km/h</strong>
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-2.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                      <Activity className="w-3 h-3 text-emerald-400" />
+                      CAPE & Intensity
+                    </span>
+                    <div className="text-sm font-extrabold text-emerald-300 mt-0.5">
+                      {cape > 0 ? `${cape} J/kg` : 'Stable'} • {dbz > 0 ? `${dbz} dBZ` : `${precipRate.toFixed(1)} mm/h`}
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      {cape >= 1000 ? 'High Convective Energy' : cape >= 400 ? 'Moderate Instability' : 'Stable Air'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Unified Map Controls & Filter Toolbar (ABOVE the Map) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-3.5 shadow-xl space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              {/* Overlay Mode (Radar vs Optical Satellite) */}
+              <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-2xl p-1 text-xs">
+                <button
+                  onClick={() => setRadarLayerType('radar')}
+                  className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    radarLayerType === 'radar'
+                      ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Live High-Refresh Doppler Precipitation Radar (5-10m)"
+                >
+                  <span>🌧️ Rain Radar</span>
+                  <span className="text-[9px] bg-slate-950/30 px-1.5 py-0.5 rounded font-mono font-bold">5-10m HD</span>
+                </button>
+
+                <button
+                  onClick={() => setRadarLayerType('satellite-vis')}
+                  className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    radarLayerType === 'satellite-vis'
+                      ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="NASA VIIRS Optical TrueColor Visible Satellite Photo"
+                >
+                  <span>🛰️ NASA Visible</span>
+                  <span className="text-[9px] bg-indigo-900/60 text-indigo-200 px-1.5 py-0.5 rounded font-mono">Optical</span>
+                </button>
+              </div>
+
+              {/* Base Map Style */}
+              <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-2xl p-1 text-xs">
+                <span className="text-[10px] text-slate-500 font-bold px-1.5 uppercase">Base:</span>
                 {(['dark', 'streets', 'satellite'] as MapTheme[]).map((mode) => (
                   <button
                     key={mode}
                     onClick={() => setMapTheme(mode)}
-                    className={`px-2.5 py-1 rounded-lg font-semibold capitalize transition-all cursor-pointer ${
+                    className={`px-2.5 py-1 rounded-xl font-semibold capitalize transition-all cursor-pointer ${
                       mapTheme === mode
                         ? 'bg-slate-800 text-sky-400 border border-slate-700 shadow-sm'
                         : 'text-slate-400 hover:text-slate-200'
@@ -1093,435 +1246,273 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
                 ))}
               </div>
 
-              {/* Radar vs Satellite Cloud Overlay Selector */}
-              <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl p-1 text-xs flex-wrap">
-                <span className="text-[10px] text-slate-500 font-bold px-1.5 uppercase">Overlay:</span>
+              {/* HD Settings Menu Trigger */}
+              <div className="relative">
                 <button
-                  onClick={() => setRadarLayerType('radar')}
-                  className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                    radarLayerType === 'radar'
-                      ? 'bg-sky-500 text-slate-950 font-bold shadow-md shadow-sky-500/20'
-                      : 'text-slate-400 hover:text-slate-200'
+                  onClick={() => setShowGranularityMenu(!showGranularityMenu)}
+                  className={`px-3 py-1.5 rounded-2xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm ${
+                    tileSize === 512 || !smoothRadar || highResRadarProvider !== 'auto'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-white'
                   }`}
-                  title="Doppler precipitation reflectivity radar (detects rain/snow/hail drops)"
+                  title="Configure Radar Image Resolution & Palettes"
                 >
-                  <span>🌧️ Rain Radar</span>
+                  <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>{tileSize === 512 ? '512px HD' : '256px'}</span>
+                  <span className="text-[10px] opacity-75 font-mono">({!smoothRadar ? 'Crisp' : 'Smooth'})</span>
                 </button>
 
-                <button
-                  onClick={() => setRadarLayerType('satellite-ir')}
-                  className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                    radarLayerType === 'satellite-ir' || (radarLayerType as string) === 'satellite'
-                      ? 'bg-purple-500 text-white font-bold shadow-md shadow-purple-500/20'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Thermal Infrared Satellite Imagery: Detects non-rainy clouds 24/7"
-                >
-                  <span>☁️ Satellite IR Cloud</span>
-                </button>
-
-                <button
-                  onClick={() => setRadarLayerType('satellite-vis')}
-                  className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                    radarLayerType === 'satellite-vis'
-                      ? 'bg-indigo-500 text-white font-bold shadow-md shadow-indigo-500/20'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="NASA VIIRS SNPP Optical TrueColor Visible Satellite Photo"
-                >
-                  <span>🛰️ NASA Visible</span>
-                </button>
-
-                <button
-                  onClick={() => setRadarLayerType('cloud-model')}
-                  className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                    radarLayerType === 'cloud-model'
-                      ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Local Cloud Coverage Grid: Displays Low, Mid, and High cloud deck rings"
-                >
-                  <span>🌫️ Cloud Deck Grid</span>
-                </button>
-              </div>
-
-              {/* Sub-Selector Bar for Satellite Source & Cloud Mode */}
-              {radarLayerType !== 'radar' && (
-                <div className="flex items-center gap-2 bg-slate-950/80 border border-slate-800 rounded-xl p-1.5 text-xs flex-wrap animate-fadeIn">
-                  <span className="text-[10px] text-slate-400 font-bold px-1 uppercase flex items-center gap-1">
-                    <span>📡 Source & Refresh:</span>
-                  </span>
-
-                  {(radarLayerType === 'satellite-ir' || radarLayerType === 'satellite-vis') && (
-                    <>
+                {/* HD Settings Dropdown */}
+                {showGranularityMenu && (
+                  <div className="absolute right-0 top-full mt-2 w-80 bg-slate-950 border border-slate-800 rounded-3xl p-4 shadow-2xl z-40 space-y-3.5 backdrop-blur-md text-xs">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                      <span className="font-bold text-white flex items-center gap-1.5 text-xs">
+                        <Zap className="w-4 h-4 text-emerald-400" />
+                        Radar Granularity & Local High-Res
+                      </span>
                       <button
-                        onClick={() => setSatelliteProvider('eumetsat_15m')}
-                        className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition-all cursor-pointer flex items-center gap-1 ${
-                          satelliteProvider === 'eumetsat_15m'
-                            ? 'bg-purple-500/30 text-purple-300 border border-purple-500/50 font-bold'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="EUMETSAT Meteosat SEVIRI Satellite: Updated every 15 minutes in real-time"
+                        onClick={() => setShowGranularityMenu(false)}
+                        className="text-slate-400 hover:text-white font-bold p-1 rounded-lg hover:bg-slate-800 transition-all cursor-pointer"
                       >
-                        <span>🇪🇺 EUMETSAT Meteosat</span>
-                        <span className="text-[9px] bg-purple-500/30 text-purple-200 px-1 rounded font-mono">15m Live</span>
+                        ✕
                       </button>
+                    </div>
 
-                      <button
-                        onClick={() => setSatelliteProvider('nasa_gibs')}
-                        className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition-all cursor-pointer flex items-center gap-1 ${
-                          satelliteProvider === 'nasa_gibs'
-                            ? 'bg-indigo-500/30 text-indigo-300 border border-indigo-500/50 font-bold'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="NASA Earthdata VIIRS Satellite: Updated 1-2 times per day via Low Earth Orbit"
-                      >
-                        <span>🚀 NASA Earthdata</span>
-                        <span className="text-[9px] bg-slate-800 text-slate-300 px-1 rounded font-mono">1-2x Daily</span>
-                      </button>
-                    </>
-                  )}
-
-                  {radarLayerType === 'cloud-model' && (
-                    <>
-                      <button
-                        onClick={() => {
-                          setCloudSubMode('clean_mask');
-                          setSatelliteProvider('eumetsat_15m');
-                        }}
-                        className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition-all cursor-pointer flex items-center gap-1 ${
-                          cloudSubMode === 'clean_mask'
-                            ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/50 font-bold'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="Clean, uncluttered cloud outlines from EUMETSAT Meteosat 15-minute feed"
-                      >
-                        <span>🇪🇺 Clean 15m Cloud Mask</span>
-                        <span className="text-[9px] bg-emerald-500/30 text-emerald-200 px-1 rounded font-mono">Uncluttered</span>
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          setCloudSubMode('cloud_top_height');
-                          setSatelliteProvider('eumetsat_15m');
-                        }}
-                        className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition-all cursor-pointer flex items-center gap-1 ${
-                          cloudSubMode === 'cloud_top_height'
-                            ? 'bg-sky-500/30 text-sky-300 border border-sky-500/50 font-bold'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="EUMETSAT 15-minute Cloud Top Height Altitude map"
-                      >
-                        <span>☁️ Cloud Altitude Height</span>
-                        <span className="text-[9px] bg-sky-500/30 text-sky-200 px-1 rounded font-mono">15m CTH</span>
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          setCloudSubMode('nasa_deck');
-                          setSatelliteProvider('nasa_gibs');
-                        }}
-                        className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition-all cursor-pointer flex items-center gap-1 ${
-                          cloudSubMode === 'nasa_deck'
-                            ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50 font-bold'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="NASA MODIS Cloud Top Pressure Deck Layer (Daily)"
-                      >
-                        <span>🚀 NASA Cloud Deck</span>
-                        <span className="text-[9px] bg-slate-800 text-slate-300 px-1 rounded font-mono">Daily</span>
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* Layer Toggles */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  onClick={() => setShowMapLabels(!showMapLabels)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showMapLabels
-                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle City & Highway Labels Layer"
-                >
-                  🏙️ Labels
-                </button>
-                <button
-                  onClick={() => setShowLightningOverlay(!showLightningOverlay)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showLightningOverlay
-                      ? 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle Convective Lightning Strike Markers"
-                >
-                  ⚡ Lightning
-                </button>
-                <button
-                  onClick={() => setShowWindVectors(!showWindVectors)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showWindVectors
-                      ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle Surface Wind Speed Vectors & Directional Streamlines"
-                >
-                  💨 Wind
-                </button>
-                <button
-                  onClick={() => setShowCloudTrajectory(!showCloudTrajectory)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showCloudTrajectory
-                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle 1-3 Hour Extrapolated Cloud Movement Trajectory Vector"
-                >
-                  ☁️ Trajectory
-                </button>
-                {radarLayerType === 'cloud-model' && (
-                  <button
-                    onClick={() => setShowCloudGridMesh(!showCloudGridMesh)}
-                    className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                      showCloudGridMesh
-                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                        : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                    }`}
-                    title="Toggle 5x5 Regional Grid Mesh & Altitude Deck Rings"
-                  >
-                    🌐 Grid Mesh
-                  </button>
-                )}
-                <button
-                  onClick={() => setShowRangeRings(!showRangeRings)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showRangeRings
-                      ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle 25km / 50km / 100km / 200km Radar Range Rings"
-                >
-                  ⭕ Rings
-                </button>
-                <button
-                  onClick={() => setShowVectorArrow(!showVectorArrow)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    showVectorArrow
-                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title="Toggle Vector Motion Arrow"
-                >
-                  ↗️ Vector
-                </button>
-                <button
-                  onClick={() => setShowLighthouses(!showLighthouses)}
-                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                    showLighthouses
-                      ? currentZoom >= 8
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        : 'bg-amber-500/10 text-amber-400/80 border border-amber-500/30'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
-                  }`}
-                  title={currentZoom < 8 ? 'Lighthouses render when zoomed in to level 8+' : 'Toggle Leuchtturm (Lighthouse) Markers'}
-                >
-                  <span>🏮</span>
-                  <span>Lighthouses</span>
-                  {showLighthouses && currentZoom < 8 && (
-                    <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono ml-0.5">
-                      Zoom 8+
-                    </span>
-                  )}
-                </button>
-                <button
-                  onClick={() => setShowLighthouseDrawer(true)}
-                  className="px-2.5 py-1.5 rounded-xl font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all cursor-pointer shadow-sm text-xs flex items-center gap-1"
-                  title="Open Lighthouse Directory & Finder"
-                >
-                  <span>Directory ({LIGHTHOUSES.length})</span>
-                </button>
-
-                {/* HD Granularity Menu Trigger */}
-                <div className="relative">
-                  <button
-                    onClick={() => setShowGranularityMenu(!showGranularityMenu)}
-                    className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm ${
-                      tileSize === 512 || !smoothRadar || highResRadarProvider !== 'auto'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-white'
-                    }`}
-                    title="Configure Radar Image Resolution & Color Palette"
-                  >
-                    <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>{tileSize === 512 ? '512px HD' : '256px'}</span>
-                    <span className="text-[10px] opacity-75 font-mono">({!smoothRadar ? 'Crisp' : 'Smooth'})</span>
-                  </button>
-
-                  {/* HD Settings Dropdown */}
-                  {showGranularityMenu && (
-                    <div className="absolute right-0 top-full mt-2 w-80 bg-slate-950 border border-slate-800 rounded-2xl p-3.5 shadow-2xl z-40 space-y-3.5 backdrop-blur-md text-xs">
-                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                        <span className="font-bold text-white flex items-center gap-1.5 text-xs">
-                          <Zap className="w-4 h-4 text-emerald-400" />
-                          Radar Granularity & Local High-Res
+                    {/* Local High-Res Radar Provider */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-slate-300">Local Radar Provider</span>
+                        <span className="text-sky-400 font-mono text-[10px]">
+                          {currentZoom >= 7 || highResRadarProvider !== 'auto' ? 'Active' : 'Standby (Zoom < 7)'}
                         </span>
+                      </div>
+                      <select
+                        value={highResRadarProvider}
+                        onChange={(e) => setHighResRadarProvider(e.target.value as any)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-slate-200 font-semibold focus:outline-none focus:border-sky-500 cursor-pointer"
+                      >
+                        <option value="auto">✨ Auto-Detect (ARPAE Italy / DWD / HD)</option>
+                        <option value="arpae_dpc">🇮🇹 Italy ARPAE / DPC Doppler (Emilia-Romagna)</option>
+                        <option value="dwd_1km">🇪🇺 Central Europe DWD 1km Composite</option>
+                        <option value="nexrad">🇺🇸 US NEXRAD High-Res Radar</option>
+                        <option value="rainviewer_hd">⚡ RainViewer 512px Crisp HD</option>
+                      </select>
+                    </div>
+
+                    {/* Resolution Selector */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-slate-300">Tile Resolution</span>
+                        <span className="text-emerald-400 font-mono text-[10px]">
+                          {tileSize === 512 ? '512×512 HD' : '256×256 Standard'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
                         <button
-                          onClick={() => setShowGranularityMenu(false)}
-                          className="text-slate-400 hover:text-white font-bold p-1 rounded-lg hover:bg-slate-800 transition-all"
+                          onClick={() => setTileSize(512)}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            tileSize === 512 ? 'bg-emerald-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+                          }`}
                         >
-                          ✕
+                          512px Ultra-HD
+                        </button>
+                        <button
+                          onClick={() => setTileSize(256)}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            tileSize === 256 ? 'bg-slate-800 text-sky-400 border border-slate-700' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          256px Standard
                         </button>
                       </div>
+                    </div>
 
-                      {/* Local High-Res Radar Provider (Zoom >= 7) */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="font-bold text-slate-300">Local Radar Provider</span>
-                          <span className="text-sky-400 font-mono text-[10px]">
-                            {currentZoom >= 7 || highResRadarProvider !== 'auto' ? 'Active' : 'Standby (Zoom < 7)'}
-                          </span>
-                        </div>
-                        <select
-                          value={highResRadarProvider}
-                          onChange={(e) => setHighResRadarProvider(e.target.value as any)}
-                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-slate-200 font-semibold focus:outline-none focus:border-sky-500"
+                    {/* Bin Filtering / Granularity */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-slate-300">Sensor Granularity</span>
+                        <span className="text-amber-400 font-mono text-[10px]">
+                          {!smoothRadar ? 'Crisp Raw Bins' : 'Smoothed'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
+                        <button
+                          onClick={() => setSmoothRadar(false)}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            !smoothRadar ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+                          }`}
                         >
-                          <option value="auto">✨ Auto-Detect (ARPAE Italy / DWD / HD)</option>
-                          <option value="arpae_dpc">🇮🇹 Italy ARPAE / DPC Doppler (Emilia-Romagna)</option>
-                          <option value="dwd_1km">🇪🇺 Central Europe DWD 1km Composite</option>
-                          <option value="nexrad">🇺🇸 US NEXRAD High-Res Radar</option>
-                          <option value="rainviewer_hd">⚡ RainViewer 512px Crisp HD</option>
-                        </select>
-                      </div>
-
-                      {/* Resolution Selector */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="font-bold text-slate-300">Tile Resolution</span>
-                          <span className="text-emerald-400 font-mono text-[10px]">
-                            {tileSize === 512 ? '512×512 HD' : '256×256 Standard'}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
-                          <button
-                            onClick={() => setTileSize(512)}
-                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                              tileSize === 512 ? 'bg-emerald-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            512px Ultra-HD
-                          </button>
-                          <button
-                            onClick={() => setTileSize(256)}
-                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                              tileSize === 256 ? 'bg-slate-800 text-sky-400 border border-slate-700' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            256px Standard
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Bin Filtering / Granularity */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="font-bold text-slate-300">Sensor Granularity</span>
-                          <span className="text-amber-400 font-mono text-[10px]">
-                            {!smoothRadar ? 'Crisp Raw Bins' : 'Smoothed'}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
-                          <button
-                            onClick={() => setSmoothRadar(false)}
-                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                              !smoothRadar ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            Crisp Raw Bins
-                          </button>
-                          <button
-                            onClick={() => setSmoothRadar(true)}
-                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                              smoothRadar ? 'bg-slate-800 text-sky-400 border border-slate-700' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            Smoothed
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Palette Selector */}
-                      <div className="space-y-1.5">
-                        <span className="text-[11px] font-bold text-slate-300 block">Reflectivity Palette</span>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {[
-                            { id: 2, name: 'Universal Blue' },
-                            { id: 4, name: 'NEXRAD Level III' },
-                            { id: 8, name: 'Severe Weather' },
-                            { id: 1, name: 'Original dBZ' }
-                          ].map((pal) => (
-                            <button
-                              key={pal.id}
-                              onClick={() => setColorScheme(pal.id)}
-                              className={`py-1.5 px-2.5 rounded-xl text-[11px] font-bold border text-left transition-all cursor-pointer ${
-                                colorScheme === pal.id
-                                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
-                                  : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200'
-                              }`}
-                            >
-                              {pal.name}
-                            </button>
-                          ))}
-                        </div>
+                          Crisp Raw Bins
+                        </button>
+                        <button
+                          onClick={() => setSmoothRadar(true)}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            smoothRadar ? 'bg-slate-800 text-sky-400 border border-slate-700' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Smoothed
+                        </button>
                       </div>
                     </div>
-                  )}
-                </div>
+
+                    {/* Palette Selector */}
+                    <div className="space-y-1.5">
+                      <span className="text-[11px] font-bold text-slate-300 block">Reflectivity Palette</span>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                          { id: 2, name: 'Universal Blue' },
+                          { id: 4, name: 'NEXRAD Level III' },
+                          { id: 8, name: 'Severe Weather' },
+                          { id: 1, name: 'Original dBZ' }
+                        ].map((pal) => (
+                          <button
+                            key={pal.id}
+                            onClick={() => setColorScheme(pal.id)}
+                            className={`py-1.5 px-2.5 rounded-xl text-[11px] font-bold border text-left transition-all cursor-pointer ${
+                              colorScheme === pal.id
+                                ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
+                                : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                            }`}
+                          >
+                            {pal.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
+            </div>
+
+            {/* Layer Toggles Row */}
+            <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-800/80">
+              <span className="text-[10px] text-slate-500 font-bold px-1 uppercase shrink-0">Layers:</span>
+              <button
+                onClick={() => setShowMapLabels(!showMapLabels)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showMapLabels
+                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle City & Highway Labels Layer"
+              >
+                🏙️ Labels
+              </button>
+              <button
+                onClick={() => setShowLightningOverlay(!showLightningOverlay)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showLightningOverlay
+                    ? 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle Convective Lightning Strike Markers"
+              >
+                ⚡ Lightning
+              </button>
+              <button
+                onClick={() => setShowWindVectors(!showWindVectors)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showWindVectors
+                    ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle Surface Wind Speed Vectors & Directional Streamlines"
+              >
+                💨 Wind
+              </button>
+              <button
+                onClick={() => setShowCloudTrajectory(!showCloudTrajectory)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showCloudTrajectory
+                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle 1-3 Hour Extrapolated Cloud Movement Trajectory Vector"
+              >
+                ☁️ Trajectory
+              </button>
+              <button
+                onClick={() => setShowRangeRings(!showRangeRings)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showRangeRings
+                    ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle 25km / 50km / 100km / 200km Radar Range Rings"
+              >
+                ⭕ Rings
+              </button>
+              <button
+                onClick={() => setShowVectorArrow(!showVectorArrow)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  showVectorArrow
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title="Toggle Vector Motion Arrow"
+              >
+                ↗️ Vectors
+              </button>
+              <button
+                onClick={() => setShowLighthouses(!showLighthouses)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                  showLighthouses
+                    ? currentZoom >= 8
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      : 'bg-amber-500/10 text-amber-400/80 border border-amber-500/30'
+                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+                }`}
+                title={currentZoom < 8 ? 'Lighthouses render when zoomed in to level 8+' : 'Toggle Leuchtturm (Lighthouse) Markers'}
+              >
+                <span>🏮 Lighthouses</span>
+                {showLighthouses && currentZoom < 8 && (
+                  <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono ml-0.5">
+                    Zoom 8+
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setShowLighthouseDrawer(true)}
+                className="px-2.5 py-1.5 rounded-xl font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all cursor-pointer shadow-sm text-xs flex items-center gap-1 ml-auto"
+                title="Open Lighthouse Directory & Finder"
+              >
+                <span>🏮 Directory ({LIGHTHOUSES.length})</span>
+              </button>
             </div>
           </div>
 
           {/* Clean, Unobstructed Radar Map Canvas Container */}
           <div className="relative bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
             {/* Minimal Floating Timestamp Tag (Top Left) */}
-            <div className="absolute top-3 left-3 z-20 pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-slate-800 text-xs font-bold text-slate-200 shadow-md">
+            <div className="absolute top-3 left-3 z-20 pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-slate-950/85 backdrop-blur-md border border-slate-800 text-xs font-bold text-slate-200 shadow-md">
               <Clock className="w-3.5 h-3.5 text-sky-400" />
               <span>
                 {radarLayerType === 'satellite-vis'
                   ? 'NASA Optical Satellite'
-                  : radarLayerType === 'satellite-ir' || (radarLayerType as string) === 'satellite'
-                  ? satelliteProvider === 'eumetsat_15m' ? 'EUMETSAT Meteosat IR' : 'NASA VIIRS IR Satellite'
-                  : radarLayerType === 'cloud-model'
-                  ? cloudSubMode === 'clean_mask' ? 'EUMETSAT Clean Cloud Mask' : cloudSubMode === 'cloud_top_height' ? 'EUMETSAT Cloud Height' : 'NASA Cloud Deck'
                   : currentFrame
                   ? new Date(currentFrame.time * 1000).toLocaleTimeString([], {
                       hour: '2-digit',
                       minute: '2-digit'
                     })
-                  : 'Live'}
+                  : 'Live Doppler'}
               </span>
-              <span className="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded font-mono">
+              <span className="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded-lg font-mono">
                 {radarLayerType === 'satellite-vis'
                   ? 'NASA HD'
-                  : radarLayerType === 'satellite-ir'
-                  ? satelliteProvider === 'eumetsat_15m' ? '15m LIVE' : 'NASA DAILY'
-                  : radarLayerType === 'cloud-model'
-                  ? cloudSubMode === 'nasa_deck' ? 'DAILY' : '15m LIVE'
                   : currentFrameIndex === frames.length - 1
                   ? 'NOW'
+                  : currentFrameIndex > (radarMaps?.radar?.past?.length ?? 0)
+                  ? 'NOWCAST'
                   : 'PAST'}
               </span>
             </div>
 
             {/* High-Res Radar & Zoom Status Badge (Top Right) */}
-            <div className="absolute top-3 right-3 z-20 pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-slate-800 text-xs font-bold text-slate-200 shadow-md">
+            <div className="absolute top-3 right-3 z-20 pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-slate-950/85 backdrop-blur-md border border-slate-800 text-xs font-bold text-slate-200 shadow-md">
               <div className="flex items-center gap-1.5 text-emerald-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span>Zoom {Math.round(currentZoom)}</span>
-                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded-lg font-mono">
                   {highResRadarProvider === 'arpae_dpc' || (highResRadarProvider === 'auto' && lat >= 35 && lat <= 47 && lon >= 6 && lon <= 19)
                     ? '🇮🇹 ARPAE / DPC Doppler'
                     : highResRadarProvider === 'dwd_1km' || (highResRadarProvider === 'auto' && lat >= 47 && lat <= 56 && lon >= 5 && lon <= 16)
@@ -1533,28 +1524,13 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
               </div>
             </div>
 
-            {/* Map Canvas */}
-            <div className="relative w-full h-[440px] sm:h-[520px]">
+            {/* Map Canvas — Fully Unobstructed */}
+            <div className="relative w-full h-[460px] sm:h-[540px]">
               <div ref={mapContainerRef} className="w-full h-full z-10" />
 
               {/* Dynamic Map Legend Bar (Bottom Left) */}
               <div className="absolute left-3 bottom-3 z-20 bg-slate-950/90 backdrop-blur-md border border-slate-800/80 rounded-2xl p-2.5 shadow-xl flex flex-col space-y-1.5 max-w-[210px] sm:max-w-xs">
-                {radarLayerType === 'satellite-ir' || (radarLayerType as string) === 'satellite' ? (
-                  <>
-                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-300">
-                      <span>☁️ Infrared Thermal Satellite</span>
-                      <span className="text-purple-400">
-                        {satelliteProvider === 'eumetsat_15m' ? 'EUMETSAT 15m' : 'NASA VIIRS IR'}
-                      </span>
-                    </div>
-                    <div className="h-2 w-full rounded-full bg-gradient-to-r from-slate-700 via-slate-400 via-sky-300 via-purple-400 to-white border border-slate-700/50"></div>
-                    <div className="flex items-center justify-between text-[9px] font-mono text-slate-400">
-                      <span>Low Cloud</span>
-                      <span>Mid Level</span>
-                      <span>High Cirrus</span>
-                    </div>
-                  </>
-                ) : radarLayerType === 'satellite-vis' ? (
+                {radarLayerType === 'satellite-vis' ? (
                   <>
                     <div className="flex items-center justify-between text-[10px] font-bold text-slate-300">
                       <span>🛰️ Visible Optical Photo</span>
@@ -1567,31 +1543,11 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
                       <span>Bright Cloud</span>
                     </div>
                   </>
-                ) : radarLayerType === 'cloud-model' ? (
-                  <>
-                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-300">
-                      <span>
-                        {cloudSubMode === 'clean_mask'
-                          ? '🌫️ Clean Cloud Mask'
-                          : cloudSubMode === 'cloud_top_height'
-                          ? '☁️ Cloud Top Height'
-                          : '🚀 NASA Cloud Deck'}
-                      </span>
-                      <span className="text-amber-400">
-                        {cloudSubMode === 'nasa_deck' ? 'NASA MODIS' : 'EUMETSAT 15m'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-3 gap-1 text-[9px] font-bold text-center">
-                      <span className="bg-emerald-500/20 text-emerald-300 rounded py-0.5 border border-emerald-500/30">Low Cloud</span>
-                      <span className="bg-sky-500/20 text-sky-300 rounded py-0.5 border border-sky-500/30">Mid Deck</span>
-                      <span className="bg-purple-500/20 text-purple-300 rounded py-0.5 border border-purple-500/30">High Deck</span>
-                    </div>
-                  </>
                 ) : (
                   <>
                     <div className="flex items-center justify-between text-[10px] font-bold text-slate-300">
                       <span>🌧️ Rain Radar dBZ</span>
-                      <span className="text-sky-400">Doppler</span>
+                      <span className="text-sky-400">5-10m Live</span>
                     </div>
                     <div className="h-2 w-full rounded-full bg-gradient-to-r from-cyan-500 via-green-400 via-yellow-400 via-orange-500 via-red-600 to-purple-600 border border-slate-700/50"></div>
                     <div className="flex items-center justify-between text-[9px] font-mono text-slate-400">
@@ -1604,94 +1560,101 @@ export const RadarView: React.FC<RadarViewProps> = ({ weatherData, prediction: i
                 )}
               </div>
 
-              {/* Floating Zoom Controls (Bottom Right) */}
+              {/* Floating Zoom & Center Controls (Bottom Right) */}
               <div className="absolute right-3 bottom-3 z-20 flex flex-col gap-1.5">
                 <button
+                  onClick={handleRecenter}
+                  className="p-2.5 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 rounded-xl text-slate-200 shadow-lg cursor-pointer"
+                  title="Re-center Map on Location"
+                >
+                  <Crosshair className="w-4 h-4 text-sky-400" />
+                </button>
+                <button
                   onClick={handleZoomIn}
-                  className="p-2 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 rounded-xl text-slate-200 shadow-lg cursor-pointer"
+                  className="p-2.5 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 rounded-xl text-slate-200 shadow-lg cursor-pointer"
                   title="Zoom In"
                 >
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button
                   onClick={handleZoomOut}
-                  className="p-2 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 rounded-xl text-slate-200 shadow-lg cursor-pointer"
+                  className="p-2.5 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 rounded-xl text-slate-200 shadow-lg cursor-pointer"
                   title="Zoom Out"
                 >
                   <ZoomOut className="w-4 h-4" />
                 </button>
               </div>
             </div>
-          </div>
 
-          {/* Player Timeline Bar */}
-          <div className="p-4 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <button
-                onClick={() => setIsPlaying(!isPlaying)}
-                className="p-3 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-bold transition-all shadow-md shadow-sky-500/20 cursor-pointer flex items-center gap-2"
-              >
-                {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                <span className="text-xs">{isPlaying ? 'Pause' : 'Play Loop'}</span>
-              </button>
+            {/* Player Timeline Bar */}
+            <div className="p-4 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  className="p-2.5 px-3.5 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-bold transition-all shadow-md shadow-sky-500/20 cursor-pointer flex items-center gap-2 text-xs"
+                >
+                  {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                  <span>{isPlaying ? 'Pause' : 'Play Loop'}</span>
+                </button>
 
-              <button
-                onClick={() => setCurrentFrameIndex(0)}
-                className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
-                title="Reset Timeline"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
+                <button
+                  onClick={() => setCurrentFrameIndex(0)}
+                  className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                  title="Reset Timeline"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
 
-              {/* Playback Speed Selector */}
-              <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs">
-                {[0.5, 1, 2, 4].map((spd) => (
-                  <button
-                    key={spd}
-                    onClick={() => setPlaybackSpeed(spd)}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                      playbackSpeed === spd
-                        ? 'bg-sky-500 text-white'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {spd}x
-                  </button>
-                ))}
+                {/* Playback Speed Selector */}
+                <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs">
+                  {[0.5, 1, 2, 4].map((spd) => (
+                    <button
+                      key={spd}
+                      onClick={() => setPlaybackSpeed(spd)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                        playbackSpeed === spd
+                          ? 'bg-sky-500 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {spd}x
+                    </button>
+                  ))}
+                </div>
+
+                <div className="text-xs font-semibold text-slate-300 ml-1">
+                  Frame {currentFrameIndex + 1} of {frames.length || 1}
+                </div>
               </div>
 
-              <div className="text-xs font-semibold text-slate-300 ml-1">
-                Frame {currentFrameIndex + 1} of {frames.length || 1}
-              </div>
-            </div>
+              {/* Scrubber & Opacity */}
+              <div className="flex items-center gap-4 w-full sm:w-auto">
+                <div className="flex-1 sm:w-48 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, frames.length - 1)}
+                    value={currentFrameIndex}
+                    onChange={(e) => {
+                      setIsPlaying(false);
+                      setCurrentFrameIndex(parseInt(e.target.value));
+                    }}
+                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-500"
+                  />
+                </div>
 
-            {/* Scrubber & Opacity */}
-            <div className="flex items-center gap-4 w-full sm:w-auto">
-              <div className="flex-1 sm:w-48 flex items-center gap-2">
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0, frames.length - 1)}
-                  value={currentFrameIndex}
-                  onChange={(e) => {
-                    setIsPlaying(false);
-                    setCurrentFrameIndex(parseInt(e.target.value));
-                  }}
-                  className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-500"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0 border-l border-slate-800 pl-4">
-                <span className="text-[11px] text-slate-400">Opacity</span>
-                <input
-                  type="range"
-                  min="0.2"
-                  max="1.0"
-                  step="0.05"
-                  value={radarOpacity}
-                  onChange={(e) => setRadarOpacity(parseFloat(e.target.value))}
-                  className="w-16 h-1.5 bg-slate-800 rounded appearance-none cursor-pointer accent-sky-500"
-                />
+                <div className="flex items-center gap-2 shrink-0 border-l border-slate-800 pl-4">
+                  <span className="text-[11px] text-slate-400">Opacity</span>
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="1.0"
+                    step="0.05"
+                    value={radarOpacity}
+                    onChange={(e) => setRadarOpacity(parseFloat(e.target.value))}
+                    className="w-16 h-1.5 bg-slate-800 rounded appearance-none cursor-pointer accent-sky-500"
+                  />
+                </div>
               </div>
             </div>
           </div>

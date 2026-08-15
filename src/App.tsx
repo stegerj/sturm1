@@ -36,6 +36,7 @@ export const App: React.FC = () => {
   const [logs, setLogs] = useState<string[]>([]);
   const [isAlertModalOpen, setIsAlertModalOpen] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [radarFocus, setRadarFocus] = useState<{ lat: number; lon: number; label?: string } | null>(null);
 
   const addLog = (message: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -168,7 +169,16 @@ export const App: React.FC = () => {
             onSelectCity={handleSelectCity}
             onUseGeolocation={handleUseGeolocation}
             onCheckStormAlerts={() => setIsAlertModalOpen(true)}
-            onOpenRadar={() => setCurrentTab('radar')}
+            onOpenRadar={(targetLat, targetLon) => {
+              if (targetLat !== undefined && targetLon !== undefined) {
+                setRadarFocus({ lat: targetLat, lon: targetLon });
+              } else if (prediction?.detectedCell?.lat !== undefined && prediction?.detectedCell?.lon !== undefined) {
+                setRadarFocus({ lat: prediction.detectedCell.lat, lon: prediction.detectedCell.lon });
+              } else {
+                setRadarFocus(null);
+              }
+              setCurrentTab('radar');
+            }}
             settings={settings}
           />
         )}
@@ -178,6 +188,7 @@ export const App: React.FC = () => {
             weatherData={weatherData}
             prediction={prediction}
             stormRisk={stormRisk}
+            focusCoordinates={radarFocus}
             onSelectLocation={(newLat, newLon, newName) => {
               setLat(newLat);
               setLon(newLon);

@@ -34,6 +34,9 @@ import { MarineMeteoCard } from './MarineMeteoCard';
 import { CloudFormationCard } from './CloudFormationCard';
 import { CloudTrajectoryCard } from './CloudTrajectoryCard';
 import { CopernicusAirQualityCard } from './CopernicusAirQualityCard';
+import { MinutePrecipitationCard } from './MinutePrecipitationCard';
+import { ConvectiveSoundingCard } from './ConvectiveSoundingCard';
+import { MultiHazardAlertsCard } from './MultiHazardAlertsCard';
 import { t, getCurrentLanguage } from '../utils/i18n';
 
 interface WeatherViewProps {
@@ -45,7 +48,7 @@ interface WeatherViewProps {
   onSelectCity: (lat: number, lon: number, cityName: string) => void;
   onUseGeolocation: () => void;
   onCheckStormAlerts: () => void;
-  onOpenRadar?: () => void;
+  onOpenRadar?: (targetLat?: number, targetLon?: number) => void;
   settings?: AppSettings;
 }
 
@@ -317,6 +320,15 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         </div>
       )}
 
+      {/* Tactical Multi-Hazard Alerts (EAS / Severe Storm Watches & Warnings) */}
+      {weatherData.activeHazards && weatherData.activeHazards.length > 0 && (
+        <MultiHazardAlertsCard
+          alerts={weatherData.activeHazards}
+          onOpenAlertModal={onCheckStormAlerts}
+          onOpenRadar={onOpenRadar}
+        />
+      )}
+
       {/* Hero Current Weather Card */}
       <div
         className={`relative overflow-hidden rounded-3xl p-6 sm:p-8 border shadow-2xl transition-all ${
@@ -406,6 +418,14 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         </div>
       </div>
 
+      {/* 60-Minute High-Resolution Nowcast Precipitation Curve */}
+      {weatherData.minutePrecipitation && (
+        <MinutePrecipitationCard
+          minutePoints={weatherData.minutePrecipitation}
+          currentPrecipMmH={currentData?.precipitation}
+        />
+      )}
+
       {/* Seaside & Marine Meteo (Waves, Sea State, Swell) */}
       <MarineMeteoCard marineData={weatherData.marine} locationName={weatherData.locationName} lang={currentLang} />
 
@@ -417,6 +437,11 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
 
       {/* Local Cloud Formation & Satellite Layers */}
       <CloudFormationCard weatherData={weatherData} lang={currentLang} onOpenSatelliteMap={onOpenRadar} />
+
+      {/* Atmospheric Sounding & Convective Indices Card */}
+      {weatherData.convectiveSounding && (
+        <ConvectiveSoundingCard sounding={weatherData.convectiveSounding} onOpenRadar={onOpenRadar} />
+      )}
 
       {/* Storm Risk Analysis Card */}
       {stormRisk && (
