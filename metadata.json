@@ -1,0 +1,6 @@
+{
+  "name": "Storm Alert",
+  "description": "Advanced storm forecasting, radar analysis, and multi-radius risk assessment application.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
