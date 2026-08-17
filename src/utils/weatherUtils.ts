@@ -92,13 +92,15 @@ export const POPULAR_CITIES: CityLocation[] = [
   { name: 'Sydney', country: 'Australia', lat: -33.8688, lon: 151.2093 }
 ];
 
-export function formatTime(isoString: string): string {
-  if (!isoString) return '';
+export function formatTime(timeInput: string | number): string {
+  if (timeInput === undefined || timeInput === null || timeInput === '') return '';
   try {
-    const date = new Date(isoString);
+    const date = typeof timeInput === 'number'
+      ? new Date(timeInput > 1e11 ? timeInput : timeInput * 1000)
+      : new Date(timeInput);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
   } catch {
-    return isoString.slice(11, 16);
+    return String(timeInput);
   }
 }
 
@@ -183,4 +185,11 @@ export function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lo
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c);
+}
+
+export function getWindDirection(deg: number = 0): string {
+  const normalized = ((deg % 360) + 360) % 360;
+  const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+  const index = Math.round(normalized / 22.5) % 16;
+  return directions[index];
 }

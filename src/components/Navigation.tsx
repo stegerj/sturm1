@@ -1,5 +1,5 @@
 import React from 'react';
-import { CloudSun, Radar, Settings, ShieldAlert, Download, Github } from 'lucide-react';
+import { CloudSun, Radar, Settings, ShieldAlert } from 'lucide-react';
 import { StormRisk, AppSettings } from '../types';
 import { t, getCurrentLanguage } from '../utils/i18n';
 
@@ -8,7 +8,6 @@ interface NavigationProps {
   onTabChange: (tab: 'weather' | 'radar' | 'settings') => void;
   stormRisk: StormRisk | null;
   onOpenAlertModal?: () => void;
-  onOpenExportModal?: () => void;
   settings?: AppSettings;
 }
 
@@ -17,7 +16,6 @@ export const Navigation: React.FC<NavigationProps> = ({
   onTabChange,
   stormRisk,
   onOpenAlertModal,
-  onOpenExportModal,
   settings
 }) => {
   const lang = getCurrentLanguage(settings?.language);
@@ -42,21 +40,8 @@ export const Navigation: React.FC<NavigationProps> = ({
             </div>
           </div>
 
-          {/* Actions in Top Bar */}
+          {/* Status Indicator */}
           <div className="flex items-center gap-2">
-            {/* Export to GitHub / Download Code Button */}
-            {onOpenExportModal && (
-              <button
-                onClick={onOpenExportModal}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 transition-all text-xs font-semibold cursor-pointer shadow-sm"
-                title="Export Code / Download to GitHub"
-              >
-                <Github className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="hidden xs:inline">Export Code</span>
-                <Download className="w-3.5 h-3.5 text-indigo-400 ml-0.5" />
-              </button>
-            )}
-
             {isStormActive ? (
               <button
                 onClick={onOpenAlertModal}
@@ -66,7 +51,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <span>{t('stormAlertActive', lang)}</span>
               </button>
             ) : (
-              <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700/60 text-slate-400 text-xs font-medium">
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700/60 text-slate-400 text-xs font-medium">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
                 <span>{t('monitoringActive', lang)}</span>
               </div>
@@ -75,7 +60,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         </div>
       </header>
 
-      {/* Bottom Navigation Bar for Mobile / Desktop Floating Nav */}
+      {/* Bottom Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-lg border-t border-slate-800 px-4 py-2 sm:py-3">
         <div className="max-w-md mx-auto flex items-center justify-around">
           <button

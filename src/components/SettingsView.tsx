@@ -3,38 +3,27 @@ import {
   Bell,
   Sliders,
   Clock,
-  Play,
-  Square,
-  RefreshCw,
   Info,
-  Radio,
-  ExternalLink,
   Globe,
-  Github,
-  Download
+  ExternalLink,
+  ShieldCheck
 } from 'lucide-react';
 import { AppSettings } from '../types';
-import { t, getCurrentLanguage, SupportedLanguage } from '../utils/i18n';
+import { t, getCurrentLanguage } from '../utils/i18n';
 
 interface SettingsViewProps {
   settings: AppSettings;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => void;
-  onSimulateBackgroundCheck: () => void;
-  onOpenExportModal?: () => void;
-  logs: string[];
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
-  onUpdateSettings,
-  onSimulateBackgroundCheck,
-  onOpenExportModal,
-  logs
+  onUpdateSettings
 }) => {
   const lang = getCurrentLanguage(settings.language);
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 mb-24">
+    <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 mb-24 animate-fadeIn">
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-2xl bg-sky-500/10 border border-sky-500/20 text-sky-400 flex items-center justify-center">
           <Bell className="w-5 h-5" />
@@ -73,7 +62,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Alert Configuration Card */}
+      {/* Storm Alert Configuration Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-6 shadow-xl">
         {/* Enable Alerts Toggle */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-800">
@@ -118,9 +107,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
 
           <div className="flex justify-between text-[11px] text-slate-500 font-medium pt-1">
-            <span>10%</span>
-            <span>50%</span>
-            <span>90%</span>
+            <span>Sensitive (10%)</span>
+            <span>Balanced (50%)</span>
+            <span>Severe Only (90%)</span>
           </div>
         </div>
 
@@ -130,7 +119,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <Clock className="w-4 h-4 text-sky-400" />
             <div>
               <div className="font-bold text-white text-sm">{t('checkInterval', lang)}</div>
-              <div className="text-xs text-slate-400">Interval for background scanning</div>
+              <div className="text-xs text-slate-400">Automatic radar scan & data refresh interval</div>
             </div>
           </div>
 
@@ -148,97 +137,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Background Service Simulator Controls */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4 shadow-xl">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Radio className="w-5 h-5 text-sky-400" />
-            <h3 className="font-bold text-white text-base">Background Service Controller</h3>
-          </div>
-
-          <div
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
-              settings.serviceRunning
-                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                : 'bg-slate-800 text-slate-400 border-slate-700'
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                settings.serviceRunning ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'
-              }`}
-            />
-            <span>{settings.serviceRunning ? 'Active' : 'Stopped'}</span>
-          </div>
+      {/* Operational Status */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-3 shadow-xl">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-emerald-400" />
+          <h3 className="font-bold text-white text-base">Weather Monitoring Engine</h3>
         </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={() => onUpdateSettings({ serviceRunning: !settings.serviceRunning })}
-            className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
-              settings.serviceRunning
-                ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/40'
-                : 'bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-md shadow-emerald-500/20'
-            }`}
-          >
-            {settings.serviceRunning ? (
-              <>
-                <Square className="w-4 h-4 fill-current" />
-                <span>Stop Service</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4 fill-current" />
-                <span>Start Service</span>
-              </>
-            )}
-          </button>
-
-          <button
-            onClick={onSimulateBackgroundCheck}
-            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-2 transition-all cursor-pointer"
-          >
-            <RefreshCw className="w-4 h-4 text-sky-400" />
-            <span>Simulate Check Now</span>
-          </button>
-        </div>
-
-        {/* Live Service Logs Terminal */}
-        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-1 font-mono text-xs text-slate-400 max-h-40 overflow-y-auto scrollbar-thin">
-          <div className="text-[10px] uppercase font-bold text-slate-500 mb-2">{t('logs', lang)}</div>
-          {logs.length === 0 ? (
-            <div className="text-slate-600 italic">No logs recorded yet.</div>
-          ) : (
-            logs.map((log, i) => (
-              <div key={i} className="leading-relaxed">
-                <span className="text-sky-400">{log}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* Export to GitHub & Download ZIP Card */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4 shadow-xl">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
-              <Github className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="font-bold text-white text-base">Export Code & GitHub</h3>
-              <p className="text-xs text-slate-400">Download complete project source archive (.zip) and push to GitHub</p>
-            </div>
-          </div>
-
-          <button
-            onClick={onOpenExportModal}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/25 transition-all cursor-pointer border border-indigo-400/30 shrink-0"
-          >
-            <Download className="w-4 h-4" />
-            <span>Export / Download ZIP</span>
-          </button>
-        </div>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          The app continuously monitors local convective storm activity, rainfall reflectivity, and cloud propagation vectors around your current coordinates.
+        </p>
       </div>
 
       {/* About & Data Sources */}

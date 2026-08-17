@@ -5,7 +5,6 @@ import { WeatherView } from './components/WeatherView';
 import { RadarView } from './components/RadarView';
 import { SettingsView } from './components/SettingsView';
 import { StormAlertModal } from './components/StormAlertModal';
-import { ExportProjectModal } from './components/ExportProjectModal';
 import { WeatherResponse, StormRisk, StormPredictionResponse, AppSettings } from './types';
 import { fetchCurrentWeather, analyzeStormRisk, generateStormPrediction } from './services/weatherApi';
 
@@ -24,24 +23,18 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Settings & Background Service State
+  // Settings State
   const [settings, setSettings] = useState<AppSettings>({
     enableAlerts: true,
     alertThreshold: 50,
     checkInterval: 15,
     serviceRunning: true,
-    selectedCity: 'Oslo, Norway'
+    selectedCity: 'Oslo, Norway',
+    language: 'auto'
   });
 
-  const [logs, setLogs] = useState<string[]>([]);
   const [isAlertModalOpen, setIsAlertModalOpen] = useState<boolean>(false);
-  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
   const [radarFocus, setRadarFocus] = useState<{ lat: number; lon: number; label?: string } | null>(null);
-
-  const addLog = (message: string) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setLogs((prev) => [`[${timestamp}] ${message}`, ...prev.slice(0, 49)]);
-  };
 
   // Load weather for location
   const loadWeather = useCallback(async (targetLat: number, targetLon: number, targetName?: string) => {
@@ -58,8 +51,6 @@ export const App: React.FC = () => {
       const pred = generateStormPrediction(data);
       setPrediction(pred);
 
-      addLog(`Updated weather for ${targetName || 'Coordinates'}. Risk: ${Math.round(risk.stormProbability * 100)}%`);
-
       // Auto pop alert modal if storm probability exceeds threshold and alerts are enabled
       if (settings.enableAlerts && risk.stormProbability * 100 >= settings.alertThreshold) {
         setIsAlertModalOpen(true);
@@ -67,7 +58,6 @@ export const App: React.FC = () => {
     } catch (err: any) {
       console.error('Failed to load weather:', err);
       setError(err?.message || 'Could not connect to Open-Meteo weather service.');
-      addLog(`Error fetching weather: ${err?.message}`);
     } finally {
       setLoading(false);
     }
@@ -78,12 +68,6 @@ export const App: React.FC = () => {
     handleUseGeolocation();
   }, []);
 
-  // Background Check Simulator Trigger
-  const handleSimulateBackgroundCheck = () => {
-    addLog('Manual background weather scan initiated...');
-    loadWeather(lat, lon, cityName);
-  };
-
   // Geolocation Handler
   const handleUseGeolocation = async () => {
     setLoading(true);
@@ -93,7 +77,6 @@ export const App: React.FC = () => {
       if (permStatus.location !== 'granted' && permStatus.coarseLocation !== 'granted') {
         const reqRes = await Geolocation.requestPermissions();
         if (reqRes.location !== 'granted' && reqRes.coarseLocation !== 'granted') {
-          alert('Location permission was denied. Loading default city (Oslo).');
           loadWeather(59.9139, 10.7522, 'Oslo, Norway');
           return;
         }
@@ -109,7 +92,6 @@ export const App: React.FC = () => {
     } catch (err) {
       console.warn('Capacitor Geolocation error, falling back to Web API:', err);
       if (!navigator.geolocation) {
-        alert('Geolocation is not supported by your device.');
         loadWeather(59.9139, 10.7522, 'Oslo, Norway');
         return;
       }
@@ -125,7 +107,6 @@ export const App: React.FC = () => {
         },
         (geoErr) => {
           console.warn('Web Geolocation error:', geoErr);
-          alert('Could not retrieve location. Loading default city (Oslo).');
           loadWeather(59.9139, 10.7522, 'Oslo, Norway');
         }
       );
@@ -140,11 +121,7 @@ export const App: React.FC = () => {
   };
 
   const handleUpdateSettings = (newSettings: Partial<AppSettings>) => {
-    setSettings((prev) => {
-      const updated = { ...prev, ...newSettings };
-      addLog(`Settings updated: Threshold=${updated.alertThreshold}%, Interval=${updated.checkInterval}m, Service=${updated.serviceRunning ? 'Active' : 'Stopped'}`);
-      return updated;
-    });
+    setSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
   return (
@@ -154,7 +131,6 @@ export const App: React.FC = () => {
         onTabChange={setCurrentTab}
         stormRisk={stormRisk}
         onOpenAlertModal={() => setIsAlertModalOpen(true)}
-        onOpenExportModal={() => setIsExportModalOpen(true)}
         settings={settings}
       />
 
@@ -204,9 +180,6 @@ export const App: React.FC = () => {
           <SettingsView
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
-            onSimulateBackgroundCheck={handleSimulateBackgroundCheck}
-            onOpenExportModal={() => setIsExportModalOpen(true)}
-            logs={logs}
           />
         )}
       </main>
@@ -215,11 +188,6 @@ export const App: React.FC = () => {
         isOpen={isAlertModalOpen}
         onClose={() => setIsAlertModalOpen(false)}
         stormRisk={stormRisk}
-      />
-
-      <ExportProjectModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
       />
     </div>
   );

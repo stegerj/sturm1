@@ -181,6 +181,44 @@ export interface CloudTrajectoryAnalysis {
   detailedAnalysis: string;
 }
 
+export interface MtgFlexibleCombinedImagerData {
+  satelliteName: string; // "MTG-I1 (Meteosat-12)"
+  scanMode: 'Full Disk (10 min)' | 'European Rapid Scan (2.5 min)';
+  channelVis06ReflectancePct: number; // FCI 0.6 µm VIS Reflectance %
+  channelIr105TempC: number; // FCI 10.5 µm IR Brightness Temp °C
+  channelWv63TempC: number; // FCI 6.3 µm Water Vapor Upper Troposphere Temp °C
+  cloudTopHeightMeters: number; // CTTH in meters
+  cloudTopPressureHpa: number; // e.g. 230 hPa
+  cloudTopTempC: number; // e.g. -52.4 °C
+  cloudPhase: 'Glaciated Ice' | 'Supercooled Water' | 'Mixed Phase' | 'Liquid Warm Cloud' | 'Cloud Free';
+  cloudTypeClassification: 'Deep Convective Core (Cb)' | 'Overshooting Convective Top' | 'Thick Multilayer Altostratus' | 'Cirrus Anvil Shield' | 'Low Stratus / Stratocumulus' | 'Fair-Weather Cumulus' | 'Clear Sky';
+  opticalThickness: number; // COT e.g. 48.5
+  overshootingTopDetected: boolean;
+  rapidCoolingRateCDegPer15Min: number; // Convective growth rate °C / 15 min
+}
+
+export interface MtgLightningImagerData {
+  operationalStatus: 'Operational - Real-Time LI Level-2';
+  totalLightningFlashRatePerMin: number; // IC + CG flashes/min in 100km radius
+  intraCloudFractionPct: number; // ~85% IC
+  cloudToGroundFractionPct: number; // ~15% CG
+  accumulatedFlashDensity: number; // flashes / 100 km² / 15 min
+  meanFlashRadiancePicoJoules: number; // pJ/sr/m²
+  lightningJumpDetected: boolean; // Tripling of flash rate in 5 min (severe convective signature)
+  closestFlashDistanceKm: number;
+  closestFlashBearingDeg: number;
+  activeFlashClustersCount: number;
+}
+
+export interface MtgSatelliteDiagnostics {
+  satelliteId: 'MTG-I1 / Meteosat-12';
+  subSatelliteLongitude: '0.0° / Geostationary 35,786 km';
+  dataDisseminationTime: string;
+  fci: MtgFlexibleCombinedImagerData;
+  li: MtgLightningImagerData;
+  nowcastingAssessment: string;
+}
+
 export interface WeatherResponse {
   latitude: number;
   longitude: number;
@@ -198,6 +236,7 @@ export interface WeatherResponse {
   convectiveSounding?: ConvectiveSounding;
   lightningStrikes?: LightningStrike[];
   activeHazards?: HazardAlert[];
+  mtgData?: MtgSatelliteDiagnostics;
 }
 
 export interface WeatherCondition {
@@ -458,6 +497,8 @@ export interface LightningStrike {
   bearingDeg: number;
   polarity: '+' | '-';
   currentKa: number;
+  energyPj?: number;
+  type?: string;
 }
 
 export interface ConvectiveSounding {

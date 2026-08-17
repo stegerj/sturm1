@@ -40,7 +40,35 @@
   filter: brightness(0.85) contrast(1.1);
 }
 
-.lighthouse-leaflet-icon {
+.lighthouse-leaflet-icon,
+.active-convective-cell-marker,
+.storm-alert-pulsing-marker {
   background: transparent !important;
   border: none !important;
+}
+
+@keyframes radar-pulse-wave {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.95;
+  }
+  60% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+.radar-pulse-wave-1 {
+  animation: radar-pulse-wave 2.2s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+}
+
+.radar-pulse-wave-2 {
+  animation: radar-pulse-wave 2.2s cubic-bezier(0.2, 0.6, 0.35, 1) 0.75s infinite;
+}
+
+.radar-pulse-wave-3 {
+  animation: radar-pulse-wave 2.2s cubic-bezier(0.2, 0.6, 0.35, 1) 1.5s infinite;
 }
