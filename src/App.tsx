@@ -134,7 +134,7 @@ export const App: React.FC = () => {
         settings={settings}
       />
 
-      <main className="flex-1 max-w-6xl w-full mx-auto p-2 sm:p-4">
+      <main className="flex-1 w-full p-2 sm:p-4">
         {currentTab === 'weather' && (
           <WeatherView
             weatherData={weatherData}

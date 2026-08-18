@@ -62,7 +62,41 @@ type RadarLayerType =
   | 'mtg-li'
   | 'eumetsat-natural'
   | 'eumetsat-ir'
-  | 'dwd-sat';
+  | 'dwd-sat'
+  | 'dpc-vmi'
+  | 'dpc-sri'
+  | 'dpc-dbz'
+  | 'dpc-srt1'
+  | 'dpc-srt3'
+  | 'dpc-srt6'
+  | 'dpc-srt12'
+  | 'dpc-srt24'
+  | 'dpc-ir';
+
+const DPC_WMS_ENDPOINT = 'https://radar-geowebcache.protezionecivile.it/service/wms';
+
+interface DpcTiledLayerConfig {
+  wmsLayer: string;
+  label: string;
+  badge: string;
+  tabLabel: string;
+  attribution: string;
+  intervalMinutes: number;
+}
+
+// Dipartimento Protezione Civile — national radar (ARPA regional composite).
+// Pre-rendered WMS tiles load as plain <img> (no API key, no CORS requirement).
+const DPC_TILED_LAYERS: Record<string, DpcTiledLayerConfig> = {
+  'dpc-vmi':   { wmsLayer: 'radar:vmi',      label: 'DPC Radar (VMI)',  badge: 'DPC/ARPA Rain (VMI)',        tabLabel: 'VMI',  attribution: '&copy; DPC Radar Nazionale — VMI (mm/h)',   intervalMinutes: 5 },
+  'dpc-sri':   { wmsLayer: 'radar:sri',      label: 'DPC SRI Rain',     badge: 'DPC/ARPA SRI Rain',          tabLabel: 'SRI',  attribution: '&copy; DPC Radar Nazionale — SRI (mm/h)',   intervalMinutes: 5 },
+  'dpc-dbz':   { wmsLayer: 'radar:radardpc', label: 'DPC Reflectivity', badge: 'DPC/ARPA Reflectivity (dBZ)', tabLabel: 'dBZ',  attribution: '&copy; DPC Radar Nazionale — composite dBZ', intervalMinutes: 5 },
+  'dpc-srt1':  { wmsLayer: 'radar:srt1',     label: 'DPC Rain 1h',      badge: 'DPC/ARPA Rain 1h',           tabLabel: 'Σ1h',  attribution: '&copy; DPC Radar Nazionale — SRT 1h',       intervalMinutes: 15 },
+  'dpc-srt3':  { wmsLayer: 'radar:srt3',     label: 'DPC Rain 3h',      badge: 'DPC/ARPA Rain 3h',           tabLabel: 'Σ3h',  attribution: '&copy; DPC Radar Nazionale — SRT 3h',       intervalMinutes: 30 },
+  'dpc-srt6':  { wmsLayer: 'radar:srt6',     label: 'DPC Rain 6h',      badge: 'DPC/ARPA Rain 6h',           tabLabel: 'Σ6h',  attribution: '&copy; DPC Radar Nazionale — SRT 6h',       intervalMinutes: 30 },
+  'dpc-srt12': { wmsLayer: 'radar:srt12',    label: 'DPC Rain 12h',     badge: 'DPC/ARPA Rain 12h',          tabLabel: 'Σ12h', attribution: '&copy; DPC Radar Nazionale — SRT 12h',      intervalMinutes: 60 },
+  'dpc-srt24': { wmsLayer: 'radar:srt24',    label: 'DPC Rain 24h',     badge: 'DPC/ARPA Rain 24h',          tabLabel: 'Σ24h', attribution: '&copy; DPC Radar Nazionale — SRT 24h',      intervalMinutes: 60 },
+  'dpc-ir':    { wmsLayer: 'radar:ir108',    label: 'DPC IR Sat',       badge: 'DPC/ARPA IR 10.8µm',         tabLabel: 'IR',   attribution: '&copy; DPC Radar Nazionale — IR 10.8µm',    intervalMinutes: 15 }
+};
 
 export const RadarView: React.FC<RadarViewProps> = ({
   weatherData,
@@ -151,6 +185,25 @@ export const RadarView: React.FC<RadarViewProps> = ({
       };
     }
 
+    // DPC / ARPA national radar & IR satellite (Italy + central Mediterranean coverage)
+    const dpcLayer = DPC_TILED_LAYERS[radarLayerType];
+    if (dpcLayer) {
+      const intervalMinutes = dpcLayer.intervalMinutes;
+      const slotMs = Math.floor((now - intervalMinutes * 60 * 1000) / (intervalMinutes * 60 * 1000)) * (intervalMinutes * 60 * 1000);
+      const dpcDate = new Date(slotMs);
+      const ageMin = Math.max(0, Math.floor((now - dpcDate.getTime()) / 60000));
+      return {
+        label: dpcLayer.label,
+        date: dpcDate,
+        utcTime: dpcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }),
+        localTime: dpcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        ageText: `${ageMin}m ago`,
+        isFuture: false,
+        isPast: true,
+        interval: `${intervalMinutes}-min scan`
+      };
+    }
+
     // Satellite Layers (EUMETSAT MTG-I1 & MSG SEVIRI)
     // MTG-I1 FCI full-disc scan interval is 10 min with ~10-12 min dissemination latency
     // MSG SEVIRI full-disc scan interval is 15 min with ~12-15 min dissemination latency
@@ -176,6 +229,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
   // Determine allowed max zoom per layer to prevent 404 / unsupported zoom levels
   const getMaxZoomForLayer = useCallback((layer: RadarLayerType) => {
+    if (DPC_TILED_LAYERS[layer]) return 18; // DPC (ARPA) national radar — native ~1km, upscaled to 18
     switch (layer) {
       case 'mtg-truecolor':
       case 'mtg-convection':
@@ -313,7 +367,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
       zoom: 7,
       minZoom: 3,
       maxZoom: initialMax,
-      zoomControl: false
+      zoomControl: false,
+      scrollWheelZoom: false
     });
 
     map.on('zoomend', () => {
@@ -500,6 +555,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
       radarTileLayerRef.current = null;
     }
 
+    const dpcLayer = DPC_TILED_LAYERS[radarLayerType];
+
     if (radarLayerType === 'radar') {
       const tileConfig = getOverlayTileConfig();
       if (tileConfig) {
@@ -603,6 +660,21 @@ export const RadarView: React.FC<RadarViewProps> = ({
         maxZoom: 14,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT Airmass RGB Composite (15-min feed)',
+        zIndex: 350
+      }).addTo(mapInstanceRef.current);
+      radarTileLayerRef.current = wmsLayer;
+    } else if (dpcLayer) {
+      // DPC / ARPA national radar — pre-rendered WMS tiles (Italy + central Mediterranean)
+      const wmsLayer = L.tileLayer.wms(DPC_WMS_ENDPOINT, {
+        layers: dpcLayer.wmsLayer,
+        format: 'image/png',
+        transparent: true,
+        version: '1.1.1',
+        opacity: radarOpacity,
+        maxZoom: 18,
+        errorTileUrl: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"/>',
+        pane: 'weatherPane',
+        attribution: dpcLayer.attribution,
         zIndex: 350
       }).addTo(mapInstanceRef.current);
       radarTileLayerRef.current = wmsLayer;
@@ -853,7 +925,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   );
 
   return (
-    <div className="max-w-6xl mx-auto px-2 sm:px-4 py-4 space-y-4 mb-24 animate-fadeIn">
+    <div className="w-full px-2 sm:px-4 py-4 space-y-4 mb-24 animate-fadeIn">
       {/* Top Header & Layer Mode Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl">
         <div className="flex items-center gap-3">
@@ -868,14 +940,17 @@ export const RadarView: React.FC<RadarViewProps> = ({
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              Live Doppler Radar, EUMETSAT Real-Time Satellite Clouds & Multi-Cell Vector Tracker
+              Global radar &amp; satellite + Italy DPC/ARPA radar at street-level zoom
             </p>
           </div>
         </div>
 
         {/* Layer Mode Tabs & Refresh */}
-        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 overflow-x-auto max-w-full">
+        <div className="flex items-start gap-2 flex-wrap">
+          {/* Global / European layers */}
+          <div className="flex items-center gap-2 w-full sm:w-auto min-w-0">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 shrink-0">Global</span>
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 overflow-x-auto max-w-full">
             {/* Doppler Radar */}
             <button
               onClick={() => setRadarLayerType('radar')}
@@ -985,6 +1060,86 @@ export const RadarView: React.FC<RadarViewProps> = ({
             >
               <span>DWD Sat</span>
             </button>
+            </div>
+          </div>
+
+          {/* Italy — DPC / ARPA national radar (regional composite, ~1km native, zoom 18) */}
+          <div className="flex items-center gap-2 w-full sm:w-auto min-w-0">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-teal-400 shrink-0">Italy · DPC/ARPA</span>
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-teal-800/60 overflow-x-auto max-w-full">
+              {/* VMI rain intensity */}
+              <button
+                onClick={() => setRadarLayerType('dpc-vmi')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                  radarLayerType === 'dpc-vmi'
+                    ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="VMI — rain intensity (mm/h), 5-min, ~1km native"
+              >
+                <CloudRain className="w-3.5 h-3.5" />
+                <span>VMI</span>
+              </button>
+
+              {/* SRI surface rain intensity */}
+              <button
+                onClick={() => setRadarLayerType('dpc-sri')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                  radarLayerType === 'dpc-sri'
+                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="SRI — surface rain intensity (mm/h), 5-min"
+              >
+                <CloudRain className="w-3.5 h-3.5" />
+                <span>SRI</span>
+              </button>
+
+              {/* National composite reflectivity */}
+              <button
+                onClick={() => setRadarLayerType('dpc-dbz')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                  radarLayerType === 'dpc-dbz'
+                    ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="National composite reflectivity (dBZ), 5-min"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>dBZ</span>
+              </button>
+
+              {/* Rainfall accumulations (1/3/6/12/24 h) */}
+              {(['dpc-srt1', 'dpc-srt3', 'dpc-srt6', 'dpc-srt12', 'dpc-srt24'] as RadarLayerType[]).map((layerId) => (
+                <button
+                  key={layerId}
+                  onClick={() => setRadarLayerType(layerId)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === layerId
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title={`${DPC_TILED_LAYERS[layerId].badge} — rainfall accumulation`}
+                >
+                  <CloudRain className="w-3.5 h-3.5" />
+                  <span>{DPC_TILED_LAYERS[layerId].tabLabel}</span>
+                </button>
+              ))}
+
+              {/* IR satellite */}
+              <button
+                onClick={() => setRadarLayerType('dpc-ir')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                  radarLayerType === 'dpc-ir'
+                    ? 'bg-teal-700 text-white shadow-md shadow-teal-700/20'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="IR 10.8 µm satellite — Italy & central Mediterranean, 15-min, high zoom"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>IR</span>
+              </button>
+            </div>
           </div>
 
           <button
@@ -1023,6 +1178,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
                     ? 'EUMETSAT Meteosat Natural Colour'
                     : radarLayerType === 'eumetsat-ir'
                     ? 'EUMETSAT Meteosat Thermal IR'
+                    : DPC_TILED_LAYERS[radarLayerType]
+                    ? DPC_TILED_LAYERS[radarLayerType].badge
                     : 'EUMETSAT Airmass RGB'}
                 </span>
               </div>
@@ -1253,7 +1410,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
       </div>
 
       {/* 100% Clean & Unobstructed Map Window */}
-      <div className="relative rounded-3xl overflow-hidden border border-slate-800 shadow-2xl bg-slate-950 h-[520px] sm:h-[620px]">
+      <div className="relative rounded-3xl overflow-hidden border border-slate-800 shadow-2xl bg-slate-950 h-[75vh] min-h-[560px] lg:h-[82vh]">
         {/* Leaflet Map Canvas */}
         <div ref={mapContainerRef} className="w-full h-full z-0" />
       </div>
