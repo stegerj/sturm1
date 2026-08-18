@@ -1,0 +1,21 @@
+# Render Blueprint — DPC radar playback proxy (server-side GeoTIFF → PNG).
+#
+# This is the backend companion to the static Storm Alert site: it fetches
+# DPC's historical radar GeoTIFFs (CORS-blocked S3) and serves colorized PNG
+# frames so the Italy tabs can scrub/play the last 2 hours.
+#
+# Deploy options:
+#   a) Dashboard: New → Web Service → connect this repo →
+#      Build: `npm install` · Start: `node server/index.mjs` · Health: /healthz
+#   b) Blueprint: push this file, then Render → New → Blueprint → pick the repo.
+services:
+  - type: web
+    name: storm-radar-dpc-proxy
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server/index.mjs
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

@@ -98,6 +98,37 @@ const DPC_TILED_LAYERS: Record<string, DpcTiledLayerConfig> = {
   'dpc-ir':    { wmsLayer: 'radar:ir108',    label: 'DPC IR Sat',       badge: 'DPC/ARPA IR 10.8µm',         tabLabel: 'IR',   attribution: '&copy; DPC Radar Nazionale — IR 10.8µm',    intervalMinutes: 15 }
 };
 
+// Playback: DPC historical frames are only published as raw GeoTIFFs behind a
+// CORS-blocked S3 bucket, so scrubbing the last 2h is proxied through the
+// Render web-service proxy (server/index.mjs) fetches, decodes, colorizes and serves PNGs.
+// Each Italy tab maps to the DPC REST product that carries the same data.
+// Note: 'dpc-dbz' (composite reflectivity) has no REST product → stays static WMS.
+const DPC_PLAYBACK_PRODUCT: Partial<Record<RadarLayerType, string>> = {
+  'dpc-vmi': 'VMI',
+  'dpc-sri': 'SRI',
+  'dpc-srt1': 'SRT1',
+  'dpc-srt3': 'CUM3',
+  'dpc-srt6': 'CUM6',
+  'dpc-srt12': 'CUM12',
+  'dpc-srt24': 'CUM24',
+  'dpc-ir': 'IR_108'
+};
+
+const DPC_PLAYBACK_STEP: Partial<Record<RadarLayerType, number>> = {
+  'dpc-vmi': 5,
+  'dpc-sri': 5,
+  'dpc-srt1': 5,
+  'dpc-ir': 15,
+  'dpc-srt3': 30,
+  'dpc-srt6': 30,
+  'dpc-srt12': 30,
+  'dpc-srt24': 30
+};
+
+// Proxy base URL — your Render web service (set via VITE_DPC_PROXY_URL).
+// Without it, Italy tabs stay on the static latest-frame WMS feed.
+const DPC_PROXY_URL = ((import.meta.env.VITE_DPC_PROXY_URL as string | undefined) || '').replace(/\/+$/, '');
+
 export const RadarView: React.FC<RadarViewProps> = ({
   weatherData,
   prediction: initialPrediction,
@@ -128,6 +159,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [showDataProvenance, setShowDataProvenance] = useState<boolean>(false);
   const [lastSatRefresh, setLastSatRefresh] = useState<Date>(new Date());
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [dpcPlaybackActive, setDpcPlaybackActive] = useState(false);
+  const [dpcBounds, setDpcBounds] = useState<L.LatLngBoundsExpression | null>(null);
+  const [dpcLoading, setDpcLoading] = useState(false);
+  const [dpcError, setDpcError] = useState<string | null>(null);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -137,6 +172,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const labelsTileLayerRef = useRef<L.TileLayer | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
+  const dpcOverlayRef = useRef<L.ImageOverlay | null>(null);
+  const dpcOverlayBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
 
   // Live second clock for accurate timestamp HUD
   useEffect(() => {
@@ -188,12 +225,15 @@ export const RadarView: React.FC<RadarViewProps> = ({
     // DPC / ARPA national radar & IR satellite (Italy + central Mediterranean coverage)
     const dpcLayer = DPC_TILED_LAYERS[radarLayerType];
     if (dpcLayer) {
-      const intervalMinutes = dpcLayer.intervalMinutes;
+      const playbackFrame = dpcPlaybackActive ? frames[currentFrameIndex] : null;
+      const intervalMinutes = playbackFrame
+        ? (DPC_PLAYBACK_STEP[radarLayerType] ?? dpcLayer.intervalMinutes)
+        : dpcLayer.intervalMinutes;
       const slotMs = Math.floor((now - intervalMinutes * 60 * 1000) / (intervalMinutes * 60 * 1000)) * (intervalMinutes * 60 * 1000);
-      const dpcDate = new Date(slotMs);
+      const dpcDate = playbackFrame ? new Date(playbackFrame.time * 1000) : new Date(slotMs);
       const ageMin = Math.max(0, Math.floor((now - dpcDate.getTime()) / 60000));
       return {
-        label: dpcLayer.label,
+        label: playbackFrame ? `${dpcLayer.label} (playback)` : dpcLayer.label,
         date: dpcDate,
         utcTime: dpcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }),
         localTime: dpcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -258,9 +298,50 @@ export const RadarView: React.FC<RadarViewProps> = ({
         setFrames(allFrames);
         setCurrentFrameIndex(allFrames.length - 1);
       }
-    } else {
+    } else if (!DPC_PLAYBACK_PRODUCT[layer]) {
       setFrames([]);
       setCurrentFrameIndex(0);
+    }
+  }, []);
+
+  // Fetch the last 2h of DPC frames for an Italy tab through the Render proxy.
+  const loadDpcFrames = useCallback(async (layer: RadarLayerType, jumpToLatest = true) => {
+    const product = DPC_PLAYBACK_PRODUCT[layer];
+    if (!product || !DPC_PROXY_URL) {
+      setDpcPlaybackActive(false);
+      setDpcBounds(null);
+      return;
+    }
+    setDpcLoading(true);
+    setDpcError(null);
+    setFrames([]); // clear any previous product's frames while loading
+    try {
+      const res = await fetch(`${DPC_PROXY_URL}/dpc/frames?product=${product}&hours=2`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `Playback backend error (HTTP ${res.status})`);
+      }
+      const data = await res.json();
+      const list = (Array.isArray(data.frames) ? data.frames : []) as number[];
+      const mapped = list.map((t) => ({
+        time: Math.round(t / 1000),
+        path: `${DPC_PROXY_URL}/dpc/frame?product=${product}&time=${t}`
+      }));
+      setFrames(mapped);
+      setCurrentFrameIndex((prev) =>
+        jumpToLatest ? Math.max(0, mapped.length - 1) : Math.min(prev, Math.max(0, mapped.length - 1))
+      );
+      if (data.bounds) {
+        setDpcBounds([[data.bounds.south, data.bounds.west], [data.bounds.north, data.bounds.east]]);
+      }
+      setDpcPlaybackActive(mapped.length > 0);
+      if (mapped.length === 0) setDpcError('No DPC frames available for the last 2 hours');
+    } catch (err) {
+      setDpcPlaybackActive(false);
+      setDpcBounds(null);
+      setDpcError(err instanceof Error ? err.message : 'DPC playback unavailable');
+    } finally {
+      setDpcLoading(false);
     }
   }, []);
 
@@ -297,9 +378,11 @@ export const RadarView: React.FC<RadarViewProps> = ({
   useEffect(() => {
     const timer = setInterval(() => {
       loadRadarData();
+      const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+      if (product && DPC_PROXY_URL) loadDpcFrames(radarLayerType, false);
     }, 10 * 60 * 1000);
     return () => clearInterval(timer);
-  }, [loadRadarData]);
+  }, [loadRadarData, radarLayerType, loadDpcFrames]);
 
   // When layer changes, update frames and enforce zoom limits
   useEffect(() => {
@@ -315,6 +398,24 @@ export const RadarView: React.FC<RadarViewProps> = ({
       }
     }
   }, [radarLayerType, radarMaps, getMaxZoomForLayer, updateFramesForLayer]);
+
+  // Load DPC frame history whenever an Italy tab is activated (backend-gated).
+  useEffect(() => {
+    const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+    if (product) {
+      setDpcPlaybackActive(false);
+      setDpcBounds(null);
+      if (DPC_PROXY_URL) {
+        loadDpcFrames(radarLayerType);
+      } else {
+        setDpcError(null);
+      }
+    } else {
+      setDpcPlaybackActive(false);
+      setDpcBounds(null);
+      setDpcError(null);
+    }
+  }, [radarLayerType, loadDpcFrames]);
 
   // Base map URL generator
   const getBaseMapUrl = (theme: MapTheme) => {
@@ -469,6 +570,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
       baseTileLayerRef.current = null;
       labelsTileLayerRef.current = null;
       radarTileLayerRef.current = null;
+      dpcOverlayRef.current = null;
+      dpcOverlayBoundsRef.current = null;
       markerRef.current = null;
       overlayGroupRef.current = null;
     };
@@ -546,13 +649,48 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, [showContours, showLabels, mapTheme]);
 
-  // Update Radar / European Satellite Tile Layer
+  // Update Radar / European Satellite Tile Layer (or DPC playback overlay)
   useEffect(() => {
     if (!mapInstanceRef.current) return;
 
     if (radarTileLayerRef.current) {
       mapInstanceRef.current.removeLayer(radarTileLayerRef.current);
       radarTileLayerRef.current = null;
+    }
+    const dpcProduct = DPC_PLAYBACK_PRODUCT[radarLayerType];
+
+    // DPC playback mode: show the selected historical frame rendered
+    // server-side by the Render proxy instead of the static WMS tiles.
+    if (dpcProduct && dpcPlaybackActive && frames.length > 0 && dpcBounds) {
+      const frame = frames[Math.min(currentFrameIndex, frames.length - 1)];
+      if (frame) {
+        const existing = dpcOverlayRef.current;
+        if (existing && dpcOverlayBoundsRef.current === dpcBounds) {
+          existing.setUrl(frame.path);
+          existing.setOpacity(radarOpacity);
+        } else {
+          if (existing) {
+            mapInstanceRef.current.removeLayer(existing);
+            dpcOverlayRef.current = null;
+          }
+          const overlay = L.imageOverlay(frame.path, dpcBounds, {
+            opacity: radarOpacity,
+            pane: 'weatherPane',
+            zIndex: 350,
+            interactive: false
+          }).addTo(mapInstanceRef.current);
+          dpcOverlayRef.current = overlay;
+          dpcOverlayBoundsRef.current = dpcBounds;
+        }
+      }
+      return;
+    }
+
+    // Not in playback mode — drop any leftover playback overlay.
+    if (dpcOverlayRef.current) {
+      mapInstanceRef.current.removeLayer(dpcOverlayRef.current);
+      dpcOverlayRef.current = null;
+      dpcOverlayBoundsRef.current = null;
     }
 
     const dpcLayer = DPC_TILED_LAYERS[radarLayerType];
@@ -679,7 +817,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
       }).addTo(mapInstanceRef.current);
       radarTileLayerRef.current = wmsLayer;
     }
-  }, [radarLayerType, radarOpacity, getOverlayTileConfig, frames, currentFrameIndex, smoothRadar, colorScheme]);
+  }, [radarLayerType, radarOpacity, getOverlayTileConfig, frames, currentFrameIndex, smoothRadar, colorScheme, dpcPlaybackActive, dpcBounds]);
 
   // Draw Range Rings & Detected Rain Cell Overlays on Map
   useEffect(() => {
@@ -1143,7 +1281,11 @@ export const RadarView: React.FC<RadarViewProps> = ({
           </div>
 
           <button
-            onClick={loadRadarData}
+            onClick={() => {
+              loadRadarData();
+              const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+              if (product && DPC_PROXY_URL) loadDpcFrames(radarLayerType, false);
+            }}
             disabled={loadingRadar}
             className="p-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer disabled:opacity-50 shrink-0"
             title="Refresh Live Data"
@@ -1415,8 +1557,42 @@ export const RadarView: React.FC<RadarViewProps> = ({
         <div ref={mapContainerRef} className="w-full h-full z-0" />
       </div>
 
+      {/* DPC playback status — shown only on Italy tabs */}
+      {DPC_PLAYBACK_PRODUCT[radarLayerType] && (
+        <div className={`bg-slate-900 border rounded-3xl p-4 sm:p-5 shadow-xl flex flex-wrap items-center justify-between gap-3 ${dpcPlaybackActive ? 'border-teal-700/50' : 'border-amber-500/25'}`}>
+          <div className="flex items-center gap-3">
+            <div className={`p-2.5 rounded-2xl ${dpcPlaybackActive ? 'bg-teal-500/10 border border-teal-500/20 text-teal-400' : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'}`}>
+              {dpcPlaybackActive ? <Play className="w-5 h-5" /> : <Info className="w-5 h-5" />}
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                {dpcPlaybackActive ? 'Italy playback ready — last 2 hours' : 'Italy playback not active'}
+              </div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {!DPC_PROXY_URL
+                  ? '2h playback needs the Render proxy. Set VITE_DPC_PROXY_URL to your Render service URL (e.g. https://storm-radar-dpc-proxy.onrender.com) to scrub through the last 2h of DPC frames.'
+                  : dpcLoading
+                  ? 'Fetching DPC frame history…'
+                  : dpcError
+                  ? dpcError
+                  : 'Showing the latest DPC frame from the tiled WMS feed.'}
+              </div>
+            </div>
+          </div>
+          {DPC_PROXY_URL && !dpcLoading && (
+            <button
+              onClick={() => loadDpcFrames(radarLayerType, false)}
+              className="px-3.5 py-2 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-teal-400" />
+              Refresh frames
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Dedicated Bottom Playback & Stream Console (Outside Map) */}
-      {radarLayerType === 'radar' && frames.length > 0 && (
+      {(radarLayerType === 'radar' || dpcPlaybackActive) && frames.length > 0 && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl space-y-4">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             {/* Playback Controls & Frame Info with Timestamp */}
@@ -1468,7 +1644,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
                   )}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-0.5">
-                  Radar Frame {currentFrameIndex + 1} of {frames.length} • 10-min interval scan
+                  {radarLayerType === 'radar'
+                    ? `Radar Frame ${currentFrameIndex + 1} of ${frames.length} • 10-min interval scan`
+                    : `DPC/ARPA frame ${currentFrameIndex + 1} of ${frames.length} • ${DPC_PLAYBACK_STEP[radarLayerType] ?? 5}-min scan`}
                 </div>
               </div>
             </div>
