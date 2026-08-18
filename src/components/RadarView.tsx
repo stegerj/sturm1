@@ -125,6 +125,38 @@ const DPC_PLAYBACK_STEP: Partial<Record<RadarLayerType, number>> = {
   'dpc-srt24': 30
 };
 
+// Legend metadata per layer — keeps the scale bar honest for every product.
+const getLayerLegend = (layer: RadarLayerType) => {
+  if (layer === 'radar') {
+    return {
+      title: 'Doppler Reflectivity Scale (dBZ)',
+      gradient: 'linear-gradient(90deg, #38bdf8, #34d399, #facc15, #fb923c, #ef4444)',
+      labels: ['Light (10 dBZ)', 'Moderate (30 dBZ)', 'Heavy (45 dBZ)', 'Severe Hail (>55 dBZ)']
+    };
+  }
+  const dpc = DPC_TILED_LAYERS[layer];
+  if (dpc) {
+    const isAccum = ['dpc-srt1', 'dpc-srt3', 'dpc-srt6', 'dpc-srt12', 'dpc-srt24'].includes(layer);
+    return {
+      title: `DPC/ARPA ${dpc.badge} — ${isAccum ? 'mm accumulation' : 'mm/h intensity'}`,
+      gradient: 'linear-gradient(90deg, #9fd5f0, #5cafde, #2b7acd, #26a054, #f0e030, #f0ac20, #f06c1e, #e43434, #c0202c, #8c2aa8, #d440ca, #ffffff)',
+      labels: ['<0.2', '1', '5', '10', '20', '30', '50', '75+']
+    };
+  }
+  if (layer === 'eumetsat-ir' || layer === 'mtg-cloudtop' || DPC_PLAYBACK_PRODUCT[layer] === 'IR_108') {
+    return {
+      title: 'IR Satellite — Cloud Top Temperature',
+      gradient: 'linear-gradient(90deg, #0d0d12, #3d3d4a, #9c9cac, #e9e9f2, #ffffff)',
+      labels: ['Warm / low cloud', '', 'Cold tops', 'Very cold (white)']
+    };
+  }
+  return {
+    title: 'Satellite Imagery (RGB composite)',
+    gradient: 'linear-gradient(90deg, #0d0d12, #3d3d4a, #9c9cac, #ffffff)',
+    labels: ['', '', '', '']
+  };
+};
+
 // Proxy base URL — your Render web service (set via VITE_DPC_PROXY_URL).
 // Without it, Italy tabs stay on the static latest-frame WMS feed.
 const DPC_PROXY_URL = ((import.meta.env.VITE_DPC_PROXY_URL as string | undefined) || '').replace(/\/+$/, '');
@@ -163,6 +195,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [dpcBounds, setDpcBounds] = useState<L.LatLngBoundsExpression | null>(null);
   const [dpcLoading, setDpcLoading] = useState(false);
   const [dpcError, setDpcError] = useState<string | null>(null);
+  const [dpcPoint, setDpcPoint] = useState<{ value: number | null; unit: string; reason: string } | null>(null);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -172,8 +205,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const labelsTileLayerRef = useRef<L.TileLayer | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
-  const dpcOverlayRef = useRef<L.ImageOverlay | null>(null);
-  const dpcOverlayBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
+  const dpcTileLayerRef = useRef<L.TileLayer | null>(null);
+  const dpcTileBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
+  const dpcTileTemplateRef = useRef<string | null>(null);
+  const frameBusyRef = useRef(false);
 
   // Live second clock for accurate timestamp HUD
   useEffect(() => {
@@ -417,6 +452,34 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, [radarLayerType, loadDpcFrames]);
 
+  // Live rain rate at the user's location for the current DPC frame.
+  useEffect(() => {
+    const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+    const frame = frames[currentFrameIndex];
+    if (!product || !DPC_PROXY_URL || !dpcPlaybackActive || !frame) {
+      setDpcPoint(null);
+      return;
+    }
+    if (weatherData?.latitude === undefined || weatherData?.longitude === undefined) {
+      setDpcPoint(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(
+      `${DPC_PROXY_URL}/dpc/point?product=${product}&time=${Math.round(frame.time * 1000)}&lat=${weatherData.latitude}&lon=${weatherData.longitude}`
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setDpcPoint(d);
+      })
+      .catch(() => {
+        if (!cancelled) setDpcPoint(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [radarLayerType, currentFrameIndex, dpcPlaybackActive, frames, weatherData?.latitude, weatherData?.longitude]);
+
   // Base map URL generator
   const getBaseMapUrl = (theme: MapTheme) => {
     switch (theme) {
@@ -570,8 +633,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
       baseTileLayerRef.current = null;
       labelsTileLayerRef.current = null;
       radarTileLayerRef.current = null;
-      dpcOverlayRef.current = null;
-      dpcOverlayBoundsRef.current = null;
+      dpcTileLayerRef.current = null;
+      dpcTileBoundsRef.current = null;
+      dpcTileTemplateRef.current = null;
       markerRef.current = null;
       overlayGroupRef.current = null;
     };
@@ -659,38 +723,57 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
     const dpcProduct = DPC_PLAYBACK_PRODUCT[radarLayerType];
 
-    // DPC playback mode: show the selected historical frame rendered
-    // server-side by the Render proxy instead of the static WMS tiles.
+    // DPC playback mode: serve the selected historical frame as Web-Mercator
+    // tiles (/dpc/tile) so playback stays sharp at every zoom — like Zoom Earth.
     if (dpcProduct && dpcPlaybackActive && frames.length > 0 && dpcBounds) {
       const frame = frames[Math.min(currentFrameIndex, frames.length - 1)];
       if (frame) {
-        const existing = dpcOverlayRef.current;
-        if (existing && dpcOverlayBoundsRef.current === dpcBounds) {
-          existing.setUrl(frame.path);
+        const template = `${DPC_PROXY_URL}/dpc/tile?product=${dpcProduct}&time=${Math.round(frame.time * 1000)}&z={z}&x={x}&y={y}`;
+        const existing = dpcTileLayerRef.current;
+        if (existing && dpcTileBoundsRef.current === dpcBounds) {
+          if (dpcTileTemplateRef.current !== template) {
+            existing.setUrl(template);
+            dpcTileTemplateRef.current = template;
+            frameBusyRef.current = true;
+            window.setTimeout(() => { frameBusyRef.current = false; }, 5000);
+          }
           existing.setOpacity(radarOpacity);
         } else {
           if (existing) {
             mapInstanceRef.current.removeLayer(existing);
-            dpcOverlayRef.current = null;
+            dpcTileLayerRef.current = null;
           }
-          const overlay = L.imageOverlay(frame.path, dpcBounds, {
+          const layer = L.tileLayer(template, {
+            bounds: dpcBounds,
+            minZoom: 3,
+            maxZoom: 18,
+            noWrap: true,
             opacity: radarOpacity,
             pane: 'weatherPane',
             zIndex: 350,
-            interactive: false
+            errorTileUrl: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"/>'
           }).addTo(mapInstanceRef.current);
-          dpcOverlayRef.current = overlay;
-          dpcOverlayBoundsRef.current = dpcBounds;
+          layer.on('loading', () => { frameBusyRef.current = true; });
+          layer.on('load', () => { frameBusyRef.current = false; });
+          layer.on('tileerror', () => {
+            window.setTimeout(() => { frameBusyRef.current = false; }, 3000);
+          });
+          dpcTileLayerRef.current = layer;
+          dpcTileBoundsRef.current = dpcBounds;
+          dpcTileTemplateRef.current = template;
+          frameBusyRef.current = true;
+          window.setTimeout(() => { frameBusyRef.current = false; }, 8000);
         }
       }
       return;
     }
 
-    // Not in playback mode — drop any leftover playback overlay.
-    if (dpcOverlayRef.current) {
-      mapInstanceRef.current.removeLayer(dpcOverlayRef.current);
-      dpcOverlayRef.current = null;
-      dpcOverlayBoundsRef.current = null;
+    // Not in playback mode — drop any leftover playback tiles.
+    if (dpcTileLayerRef.current) {
+      mapInstanceRef.current.removeLayer(dpcTileLayerRef.current);
+      dpcTileLayerRef.current = null;
+      dpcTileBoundsRef.current = null;
+      dpcTileTemplateRef.current = null;
     }
 
     const dpcLayer = DPC_TILED_LAYERS[radarLayerType];
@@ -1004,23 +1087,51 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, [lat, lon, showRangeRings, showVectorArrow, prediction, weatherData, radarLayerType]);
 
-  // Animation Loop for Radar/Satellite Frames
+  // Animation Loop for Radar/Satellite Frames — advances only after the
+  // current frame's tiles have actually painted (frameBusyRef), so playback
+  // never races ahead of the proxy and aborts pending image loads.
   useEffect(() => {
     if (!isPlaying || frames.length === 0) return;
 
-    const intervalMs = Math.round(750 / playbackSpeed);
+    const intervalMs = Math.round(600 / playbackSpeed);
     const timer = setInterval(() => {
+      if (frameBusyRef.current) return;
       setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
     }, intervalMs);
 
     return () => clearInterval(timer);
   }, [isPlaying, frames.length, playbackSpeed]);
 
+  // Prefetch the next frame while playing (warms the proxy raster cache so
+  // the frame change paints almost instantly).
+  useEffect(() => {
+    if (!isPlaying || frames.length === 0) return;
+    if (!DPC_PLAYBACK_PRODUCT[radarLayerType]) return;
+    const next = frames[(currentFrameIndex + 1) % frames.length];
+    if (next && next.path) {
+      const pre = new Image();
+      pre.src = next.path;
+    }
+  }, [isPlaying, frames, currentFrameIndex, radarLayerType]);
+
   const currentFrame = frames[currentFrameIndex];
   const isFutureFrame = currentFrame && radarMaps?.radar?.nowcast?.some((f) => f.time === currentFrame.time);
   const isPastFrame = currentFrame && radarMaps?.radar?.past?.some((f) => f.time === currentFrame.time);
 
   const maxAllowedZoom = getMaxZoomForLayer(radarLayerType);
+
+  const legend = getLayerLegend(radarLayerType);
+
+  const dpcPointColor =
+    dpcPoint?.value == null
+      ? 'bg-slate-950 border-slate-800 text-slate-300'
+      : dpcPoint.value >= 30
+      ? 'bg-purple-500/15 border-purple-500/40 text-purple-300'
+      : dpcPoint.value >= 15
+      ? 'bg-red-500/15 border-red-500/40 text-red-300'
+      : dpcPoint.value >= 5
+      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+      : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
 
   const handleZoomIn = () => {
     if (mapInstanceRef.current && currentZoom < maxAllowedZoom) {
@@ -1577,6 +1688,14 @@ export const RadarView: React.FC<RadarViewProps> = ({
                   ? dpcError
                   : 'Showing the latest DPC frame from the tiled WMS feed.'}
               </div>
+              {dpcPlaybackActive && (
+                <div className={`mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold ${dpcPointColor}`}>
+                  <MapPin className="w-3.5 h-3.5" />
+                  {dpcPoint?.value != null
+                    ? `${dpcPoint.value} ${dpcPoint.unit} of rain over ${locationName}`
+                    : `No precipitation over ${locationName} right now`}
+                </div>
+              )}
             </div>
           </div>
           {DPC_PROXY_URL && !dpcLoading && (
@@ -1647,6 +1766,11 @@ export const RadarView: React.FC<RadarViewProps> = ({
                   {radarLayerType === 'radar'
                     ? `Radar Frame ${currentFrameIndex + 1} of ${frames.length} • 10-min interval scan`
                     : `DPC/ARPA frame ${currentFrameIndex + 1} of ${frames.length} • ${DPC_PLAYBACK_STEP[radarLayerType] ?? 5}-min scan`}
+                  {radarLayerType !== 'radar' && currentFrameIndex === frames.length - 1 && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 ml-1">
+                      Latest
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -1897,12 +2021,12 @@ export const RadarView: React.FC<RadarViewProps> = ({
         )}
       </div>
 
-      {/* Radar Reflectivity Scale Legend */}
+      {/* Layer Scale Legend — adapts to the active layer */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-sky-400" />
-            <h3 className="font-bold text-white text-sm">Doppler Reflectivity Scale (dBZ)</h3>
+            <h3 className="font-bold text-white text-sm">{legend.title}</h3>
           </div>
           <div className="flex items-center gap-3 text-xs text-slate-400">
             <div className="flex items-center gap-1.5">
@@ -1921,14 +2045,12 @@ export const RadarView: React.FC<RadarViewProps> = ({
           </div>
         </div>
 
-        {/* Reflectivity Gradient Bar */}
         <div className="space-y-1.5">
-          <div className="h-3 rounded-full bg-gradient-to-r from-sky-400 via-emerald-400 via-yellow-400 via-orange-500 to-red-600 shadow-inner" />
+          <div className="h-3 rounded-full shadow-inner" style={{ background: legend.gradient }} />
           <div className="flex justify-between text-[11px] font-mono text-slate-400">
-            <span>Light (10 dBZ)</span>
-            <span>Moderate (30 dBZ)</span>
-            <span>Heavy (45 dBZ)</span>
-            <span>Severe Hail (&gt;55 dBZ)</span>
+            {legend.labels.map((label, i) => (
+              <span key={i}>{label}</span>
+            ))}
           </div>
         </div>
       </div>

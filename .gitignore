@@ -87,3 +87,6 @@ lint/tmp/
 # Node.js dependencies & build output
 node_modules/
 dist/
+
+# Local env (Freebuff sandbox / Vite)
+.env.local

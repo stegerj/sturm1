@@ -7,10 +7,12 @@
  * disabled — a browser can neither fetch the bytes nor render the projection.
  *
  * Endpoints:
- *   GET /healthz                              → "ok"
- *   GET /dpc/frames?product=VMI&hours=2       → { product, stepMinutes, latest,
- *                                                  frames: epoch-ms[], bounds }
- *   GET /dpc/frame?product=VMI&time=<epoch-ms> → colorized PNG
+ *   GET /healthz                                        → "ok"
+ *   GET /dpc/frames?product=VMI&hours=2                 → { product, stepMinutes,
+ *                                                            latest, frames, bounds }
+ *   GET /dpc/tile?product=VMI&time=<ms>&z=<z>&x=<x>&y=<y> → 256×256 colorized tile
+ *   GET /dpc/point?product=VMI&time=<ms>&lat=<lat>&lon=<lon> → value at location
+ *   GET /dpc/frame?product=VMI&time=<ms>                → full colorized PNG (fallback)
  *
  * Products: VMI, SRI, SRT1, CUM3..24, IR_108, plus VIL, ETM, POH, CAPPI_1..10.
  */
@@ -42,6 +44,12 @@ const STEP_MINUTES = {
   VIL: 5,
   ETM: 5,
   POH: 5,
+};
+
+const UNITS = {
+  VMI: "mm/h", SRI: "mm/h", SRT1: "mm", CUM3: "mm", CUM6: "mm",
+  CUM12: "mm", CUM24: "mm", IR_108: "K", TEMP: "°C",
+  VIL: "kg/m²", ETM: "km", POH: "%",
 };
 
 /**
@@ -126,6 +134,21 @@ const DPC_PROJ =
   "+proj=tmerc +lat_0=42 +lon_0=12.5 +k=0.9996 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs";
 proj4.defs("DPC-RADAR", DPC_PROJ);
 const toWgs = proj4("DPC-RADAR", "WGS84");
+const toDpc = proj4("WGS84", "DPC-RADAR");
+
+// ---------------------------------------------------------------------------
+// Caches (frames list 90s, PNG tiles 10 min, bounds 10 min, decoded rasters LRU).
+// ---------------------------------------------------------------------------
+const frameListCache = new Map();
+const pngCache = new Map();
+const tileCache = new Map();
+const boundsCache = new Map();
+const tiffCache = new Map(); // product:time -> { img, w, h, origin, res }
+
+function cacheSet(map, key, at, value, cap = 500) {
+  if (map.size > cap) map.clear();
+  map.set(key, { at, value });
+}
 
 async function computeBounds(raw) {
   const tiff = await fromArrayBuffer(raw);
@@ -137,14 +160,93 @@ async function computeBounds(raw) {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering — decode GeoTIFF, colorize, encode half-resolution PNG
-// (1200×1400 → 600×700, plenty for the national view, 4× cheaper).
+// Raster access — decode once per (product, time), keep the decoded image in
+// memory so windowed tile reads come from the in-memory buffer, not S3.
+// ---------------------------------------------------------------------------
+async function getRaster(product, time) {
+  const key = `${product}:${time}`;
+  const hit = tiffCache.get(key);
+  if (hit) return hit.value;
+  const s3 = await downloadUrl(product, time);
+  if (!s3) return null;
+  const raw = await (await fetch(s3)).arrayBuffer();
+  const tiff = await fromArrayBuffer(raw);
+  const img = await tiff.getImage();
+  const entry = {
+    img,
+    w: img.getWidth(),
+    h: img.getHeight(),
+    origin: img.getOrigin(),   // [crsX, crsY] of the top-left pixel
+    res: img.getResolution(),  // [rx, ry], ry negative for north-up rasters
+  };
+  cacheSet(tiffCache, key, Date.now(), entry, 8);
+  return entry;
+}
+
+function pixelToCrs(entry, px, py) {
+  const rx = entry.res[0];
+  const ry = Math.abs(entry.res[1]);
+  return [
+    entry.origin[0] + px * rx,
+    entry.origin[1] - py * ry,
+  ];
+}
+
+function crsToPixel(entry, crsX, crsY) {
+  const rx = entry.res[0];
+  const ry = Math.abs(entry.res[1]);
+  return [
+    (crsX - entry.origin[0]) / rx,
+    (entry.origin[1] - crsY) / ry,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — colorize a raster band into a PNG.
 // ---------------------------------------------------------------------------
 function scaleForProduct(product) {
   if (product === "VIL") return (v) => colorForValue(v, VIL_STOPS);
   if (product === "ETM") return (v) => colorForValue(v, ETM_STOPS);
   if (product === "POH") return (v) => colorForValue(v, POH_STOPS);
   return (v) => colorForValue(v, RAIN_STOPS); // VMI, SRI, SRT1, CUM*, CAPPI*
+}
+
+function colorizeBand(band, width, height, scale) {
+  const png = new PNG({ width, height });
+  for (let i = 0; i < band.length; i++) {
+    const c = scale(band[i]);
+    if (!c) continue;
+    const o = i * 4;
+    png.data[o] = c[0];
+    png.data[o + 1] = c[1];
+    png.data[o + 2] = c[2];
+    png.data[o + 3] = 255;
+  }
+  return PNG.sync.write(png);
+}
+
+async function irColorize(band, width, height) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < band.length; i++) {
+    const v = band[i];
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  const span = max - min || 1;
+  const png = new PNG({ width, height });
+  for (let i = 0; i < band.length; i++) {
+    const v = band[i];
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) continue;
+    const g = Math.round(255 * (1 - (v - min) / span));
+    const o = i * 4;
+    png.data[o] = g;
+    png.data[o + 1] = g;
+    png.data[o + 2] = g;
+    png.data[o + 3] = 255;
+  }
+  return PNG.sync.write(png);
 }
 
 async function renderPng(raw, product) {
@@ -154,49 +256,108 @@ async function renderPng(raw, product) {
   const h = img.getHeight();
   const rasters = await img.readRasters();
   const data = rasters[0];
-
-  // IR satellite (IR_108, brightness temperature K): classic grayscale,
-  // cold/high cloud tops → white.
-  if (product === "IR_108") {
-    let min = Infinity;
-    let max = -Infinity;
-    for (let i = 0; i < data.length; i++) {
-      const v = data[i];
-      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) continue;
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
-    const span = max - min || 1;
-    return renderRawPng(data, w, h, (v) => {
-      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return null;
-      const g = Math.round(255 * (1 - (v - min) / span));
-      return [g, g, g];
-    });
-  }
-
-  const scale = scaleForProduct(product);
-  return renderRawPng(data, w, h, scale);
+  if (product === "IR_108") return irColorize(data, w, h);
+  return colorizeBand(data, w, h, scaleForProduct(product));
 }
 
-function renderRawPng(data, w, h, scale) {
-  const sw = Math.round(w / 2);
-  const sh = Math.round(h / 2);
-  const png = new PNG({ width: sw, height: sh });
-  for (let y = 0; y < sh; y++) {
-    const sy = Math.min(h - 1, y * 2);
-    const row = sy * w;
-    for (let x = 0; x < sw; x++) {
-      const v = data[row + Math.min(w - 1, x * 2)];
-      const c = scale(v);
-      if (!c) continue;
-      const o = (y * sw + x) * 4;
-      png.data[o] = c[0];
-      png.data[o + 1] = c[1];
-      png.data[o + 2] = c[2];
-      png.data[o + 3] = 255;
+// ---------------------------------------------------------------------------
+// Web-Mercator tile math (slippy map)
+// ---------------------------------------------------------------------------
+function tileToLonLat(z, x, y) {
+  const n = 2 ** z;
+  const lonW = (x / n) * 360 - 180;
+  const lonE = ((x + 1) / n) * 360 - 180;
+  const latN = Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * (180 / Math.PI);
+  const latS = Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * (180 / Math.PI);
+  return { lonW, lonE, latN, latS };
+}
+
+// One 256×256 tile of the DPC raster, reprojected into Web Mercator.
+async function renderTile(entry, product, z, x, y) {
+  const { lonW, lonE, latN, latS } = tileToLonLat(z, x, y);
+  const tl = toDpc.forward([lonW, latN]);
+  const br = toDpc.forward([lonE, latS]);
+  const [px0, py0] = crsToPixel(entry, tl[0], tl[1]);
+  const [px1, py1] = crsToPixel(entry, br[0], br[1]);
+  const { w, h } = entry;
+
+  // Whole tile outside the raster → transparent (client shows errorTileUrl).
+  if (px1 <= 0 || py1 <= 0 || px0 >= w || py0 >= h) return null;
+
+  // Sub-rect of the tile (in tile pixels) that overlaps the raster.
+  const tx0 = Math.max(0, ((0 - px0) * 256) / (px1 - px0));
+  const ty0 = Math.max(0, ((0 - py0) * 256) / (py1 - py0));
+  const tx1 = Math.min(256, ((w - px0) * 256) / (px1 - px0));
+  const ty1 = Math.min(256, ((h - py0) * 256) / (py1 - py0));
+
+  const winX0 = Math.max(0, Math.floor(px0 + (tx0 * (px1 - px0)) / 256));
+  const winY0 = Math.max(0, Math.floor(py0 + (ty0 * (py1 - py0)) / 256));
+  const winX1 = Math.min(w, Math.ceil(px0 + (tx1 * (px1 - px0)) / 256));
+  const winY1 = Math.min(h, Math.ceil(py0 + (ty1 * (py1 - py0)) / 256));
+  const readW = Math.max(1, winX1 - winX0);
+  const readH = Math.max(1, winY1 - winY0);
+
+  const rasters = await entry.img.readRasters({
+    window: [winX0, winY0, winX1, winY1],
+    width: Math.round(tx1 - tx0) || 1,
+    height: Math.round(ty1 - ty0) || 1,
+  });
+  const band = rasters[0];
+
+  // Place the sampled region into the 256×256 output at its tile offset.
+  const out = new PNG({ width: 256, height: 256 });
+  const outW = Math.round(tx1 - tx0);
+  const outH = Math.round(ty1 - ty0);
+  const offX = Math.round(tx0);
+  const offY = Math.round(ty0);
+
+  if (product === "IR_108") {
+    // Grayscale: cold/high cloud tops → white.
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < band.length; i++) {
+      const v = band[i];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
+    const span = max - min || 1;
+    for (let sy = 0; sy < outH; sy++) {
+      const oy = offY + sy;
+      if (oy < 0 || oy >= 256) continue;
+      for (let sx = 0; sx < outW; sx++) {
+        const ox = offX + sx;
+        if (ox < 0 || ox >= 256) continue;
+        const v = band[sy * outW + sx];
+        if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) continue;
+        const g = Math.round(255 * (1 - (v - min) / span));
+        const o = (oy * 256 + ox) * 4;
+        out.data[o] = g;
+        out.data[o + 1] = g;
+        out.data[o + 2] = g;
+        out.data[o + 3] = 255;
+      }
+    }
+  } else {
+    const scale = scaleForProduct(product);
+    for (let sy = 0; sy < outH; sy++) {
+      const oy = offY + sy;
+      if (oy < 0 || oy >= 256) continue;
+      for (let sx = 0; sx < outW; sx++) {
+        const ox = offX + sx;
+        if (ox < 0 || ox >= 256) continue;
+        const c = scale(band[sy * outW + sx]);
+        if (!c) continue;
+        const o = (oy * 256 + ox) * 4;
+        out.data[o] = c[0];
+        out.data[o + 1] = c[1];
+        out.data[o + 2] = c[2];
+        out.data[o + 3] = 255;
+      }
     }
   }
-  return PNG.sync.write(png);
+  return PNG.sync.write(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,19 +382,6 @@ async function downloadUrl(product, time) {
   if (!res.ok) return null;
   const json = await res.json();
   return typeof json.url === "string" ? json.url : null;
-}
-
-// ---------------------------------------------------------------------------
-// Caches (frames list 90s, PNG 10 min, bounds 10 min) with a size cap so a
-// long-lived web service never grows without bound.
-// ---------------------------------------------------------------------------
-const frameListCache = new Map();
-const pngCache = new Map();
-const boundsCache = new Map();
-
-function cacheSet(map, key, at, value) {
-  if (map.size > 500) map.clear();
-  map.set(key, { at, value });
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +420,6 @@ async function handleFrames(url) {
 
   const body = { product, stepMinutes: step, latest, hours, frames: times, bounds: null };
 
-  // Bounds come from the actual raster (same national grid for all products).
   if (times.length > 0) {
     const latestT = times[times.length - 1];
     const bKey = `${product}:${latestT}`;
@@ -297,6 +444,77 @@ async function handleFrames(url) {
   return { status: 200, json: body };
 }
 
+async function handleTile(url) {
+  const product = (url.searchParams.get("product") ?? "VMI").toUpperCase();
+  const time = Number(url.searchParams.get("time"));
+  const z = Number(url.searchParams.get("z"));
+  const x = Number(url.searchParams.get("x"));
+  const y = Number(url.searchParams.get("y"));
+  if (![time, z, x, y].every((v) => Number.isInteger(v) && v >= 0)) {
+    return { status: 400, json: { error: "time/z/x/y must be non-negative integers" } };
+  }
+  if (z > 19 || x >= 2 ** z || y >= 2 ** z) {
+    return { status: 400, json: { error: "tile coordinates out of range" } };
+  }
+
+  const cacheKey = `${product}:${time}:${z}:${x}:${y}`;
+  const hit = tileCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < 600_000) {
+    return { status: 200, png: hit.value };
+  }
+
+  const entry = await getRaster(product, time);
+  if (!entry) return { status: 404, json: { error: "frame not found" } };
+
+  const png = await renderTile(entry, product, z, x, y);
+  if (!png) return { status: 404, json: { error: "tile outside coverage" } };
+
+  cacheSet(tileCache, cacheKey, Date.now(), png, 2000);
+  return { status: 200, png };
+}
+
+async function handlePoint(url) {
+  const product = (url.searchParams.get("product") ?? "VMI").toUpperCase();
+  const time = Number(url.searchParams.get("time"));
+  const lat = Number(url.searchParams.get("lat"));
+  const lon = Number(url.searchParams.get("lon"));
+  if (!Number.isFinite(time) || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return { status: 400, json: { error: "time/lat/lon required" } };
+  }
+
+  const entry = await getRaster(product, time);
+  if (!entry) return { status: 404, json: { error: "frame not found" } };
+
+  const [px, py] = crsToPixel(entry, ...toDpc.forward([lon, lat]));
+  const { w, h } = entry;
+  if (px < 0 || py < 0 || px >= w || py >= h) {
+    return { status: 200, json: { product, time, value: null, reason: "outside-coverage", unit: UNITS[product] ?? "" } };
+  }
+
+  // Nearest-neighbor sample (radar cells are discontinuous; bilinear would
+  // smear NoData across sparse rain cells and report false nulls).
+  const fx = Math.round(px);
+  const fy = Math.round(py);
+  const winX = Math.max(0, Math.min(w - 1, fx));
+  const winY = Math.max(0, Math.min(h - 1, fy));
+  const rasters = await entry.img.readRasters({
+    window: [winX, winY, winX + 1, winY + 1],
+  });
+  const v = rasters[0][0];
+  const value = typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+
+  return {
+    status: 200,
+    json: {
+      product,
+      time,
+      value: value === null ? null : Math.round(value * 100) / 100,
+      reason: value === null ? "no-data" : "ok",
+      unit: UNITS[product] ?? "",
+    },
+  };
+}
+
 async function handleFrame(url) {
   const product = (url.searchParams.get("product") ?? "VMI").toUpperCase();
   const time = Number(url.searchParams.get("time"));
@@ -310,13 +528,13 @@ async function handleFrame(url) {
     return { status: 200, png: hit.value };
   }
 
-  const s3 = await downloadUrl(product, time);
-  if (!s3) {
-    return { status: 404, json: { error: `Frame not found for ${product} @ ${time}` } };
-  }
+  const entry = await getRaster(product, time);
+  if (!entry) return { status: 404, json: { error: `Frame not found for ${product} @ ${time}` } };
 
-  const raw = await (await fetch(s3)).arrayBuffer();
-  const bytes = await renderPng(raw, product);
+  const rasters = await entry.img.readRasters();
+  const bytes = product === "IR_108"
+    ? await irColorize(rasters[0], entry.w, entry.h)
+    : colorizeBand(rasters[0], entry.w, entry.h, scaleForProduct(product));
   cacheSet(pngCache, key, Date.now(), bytes);
   return { status: 200, png: bytes };
 }
@@ -343,6 +561,10 @@ const server = http.createServer(async (req, res) => {
       return;
     } else if (url.pathname === "/dpc/frames") {
       result = await handleFrames(url);
+    } else if (url.pathname === "/dpc/tile") {
+      result = await handleTile(url);
+    } else if (url.pathname === "/dpc/point") {
+      result = await handlePoint(url);
     } else if (url.pathname === "/dpc/frame") {
       result = await handleFrame(url);
     } else {
@@ -351,20 +573,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (result.json) {
-      res.writeHead(result.status, {
-        "content-type": "application/json",
-        "cache-control": result.status === 200 ? "no-store" : "no-store",
-      });
-      res.end(JSON.stringify(result.json));
-    } else if (result.png) {
+    if (result.png) {
       res.writeHead(result.status, {
         "content-type": "image/png",
         "cache-control": "public, max-age=300",
       });
       res.end(result.png);
     } else {
-      res.writeHead(result.status, { "content-type": "application/json" });
+      res.writeHead(result.status, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(result.json ?? { error: "Unknown error" }));
     }
     console.log(`${req.method} ${url.pathname} → ${result.status} (${Date.now() - started}ms)`);
