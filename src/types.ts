@@ -368,14 +368,19 @@ export interface RadarFrame {
   path: string;
 }
 
+export interface RadarColorScheme {
+  id: number;
+  name: string;
+}
+
 export interface RadarMapsResponse {
   version: string;
   generated: number;
   host: string;
   radar: {
     past: RadarFrame[];
-    now: RadarFrame | null;
-    future: RadarFrame[];
+    nowcast: RadarFrame[];
+    colorSchemes?: RadarColorScheme[];
   };
   satellite?: {
     infrared: RadarFrame[];

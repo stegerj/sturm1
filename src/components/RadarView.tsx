@@ -198,8 +198,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     if (layer === 'radar') {
       const allFrames: RadarFrame[] = [];
       if (maps.radar?.past) allFrames.push(...maps.radar.past);
-      if (maps.radar?.now) allFrames.push(maps.radar.now);
-      if (maps.radar?.future) allFrames.push(...maps.radar.future);
+      if (maps.radar?.nowcast) allFrames.push(...maps.radar.nowcast);
 
       if (allFrames.length > 0) {
         setFrames(allFrames);
@@ -238,6 +237,15 @@ export const RadarView: React.FC<RadarViewProps> = ({
   useEffect(() => {
     loadRadarData();
   }, [lat, lon, loadRadarData]);
+
+  // Auto-refresh radar data on the same 10-minute cadence as the RainViewer feed
+  // (matches Zoom Earth's silent update behaviour so the map never goes stale)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadRadarData();
+    }, 10 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [loadRadarData]);
 
   // When layer changes, update frames and enforce zoom limits
   useEffect(() => {
@@ -507,7 +515,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
         }).addTo(mapInstanceRef.current);
         radarTileLayerRef.current = tileLayer;
       }
-    } else if (radarLayerType === 'mtg-truecolor' || radarLayerType === 'mtg-li') {
+    } else if (radarLayerType === 'mtg-truecolor') {
       // EUMETSAT MTG-I1 / Meteosat-12 True Colour RGB (0.5–1km resolution FCI)
       const wmsLayer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
         layers: 'mtg_fd:rgb_truecolour',
@@ -517,6 +525,19 @@ export const RadarView: React.FC<RadarViewProps> = ({
         maxZoom: 14,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT MTG-I1 / Meteosat-12 True Colour (FCI Full-Disc)',
+        zIndex: 350
+      }).addTo(mapInstanceRef.current);
+      radarTileLayerRef.current = wmsLayer;
+    } else if (radarLayerType === 'mtg-li') {
+      // EUMETSAT MTG-I1 Lightning Imager (LI) accumulated flash area
+      const wmsLayer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
+        layers: 'mtg_fd:li_afa',
+        format: 'image/png',
+        transparent: true,
+        opacity: radarOpacity,
+        maxZoom: 14,
+        pane: 'weatherPane',
+        attribution: '&copy; EUMETSAT MTG-I1 Lightning Imager (LI)',
         zIndex: 350
       }).addTo(mapInstanceRef.current);
       radarTileLayerRef.current = wmsLayer;
@@ -786,7 +807,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   }, [isPlaying, frames.length, playbackSpeed]);
 
   const currentFrame = frames[currentFrameIndex];
-  const isFutureFrame = currentFrame && radarMaps?.radar?.future?.some((f) => f.time === currentFrame.time);
+  const isFutureFrame = currentFrame && radarMaps?.radar?.nowcast?.some((f) => f.time === currentFrame.time);
   const isPastFrame = currentFrame && radarMaps?.radar?.past?.some((f) => f.time === currentFrame.time);
 
   const maxAllowedZoom = getMaxZoomForLayer(radarLayerType);
@@ -1021,6 +1042,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
                   </span>
                   <span className="text-[10px] font-sans px-2 py-0.5 rounded-full bg-slate-800 text-sky-300 font-semibold border border-slate-700">
                     {imageInfo.ageText}
+                  </span>
+                  <span
+                    className="text-[10px] font-sans px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-semibold border border-emerald-500/30 hidden sm:inline-flex items-center gap-1"
+                    title="Radar data auto-refreshes every 10 minutes (RainViewer feed cadence)"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Auto 10-min
                   </span>
                 </div>
               </div>
@@ -1345,7 +1373,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
             <div className="flex justify-between text-[11px] text-slate-400 font-mono">
               <span>{frames.length > 0 ? formatTime(frames[0].time) : '--:--'} UTC (Start)</span>
               <span className="text-sky-400 font-bold">Scrubber (Click / Drag to inspect)</span>
-              <span>{frames.length > 0 ? formatTime(frames[frames.length - 1].time) : '--:--'} UTC (Nowcast)</span>
+              <span>{frames.length > 0 ? formatTime(frames[frames.length - 1].time) : '--:--'} UTC (Latest)</span>
             </div>
             <input
               type="range"

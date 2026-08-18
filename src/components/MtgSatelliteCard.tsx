@@ -48,15 +48,15 @@ export const MtgSatelliteCard: React.FC<MtgSatelliteCardProps> = ({ mtgData, onO
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
-                EUMETSAT MTG Data
+                Satellite Diagnostic
               </h3>
               <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                MTG-I1 / Meteosat-12
+                Model estimate
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Meteosat Third Generation FCI (16 Channels) & LI (Lightning Imager) Level-2 Telemetry
+              Model-derived atmospheric estimate (Open-Meteo NWP) — not live EUMETSAT instrument telemetry
             </p>
           </div>
         </div>

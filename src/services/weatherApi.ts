@@ -30,8 +30,12 @@ import { getWeatherCondition } from '../utils/weatherUtils';
 import { analyzeCloudTrajectory } from './cloudTrajectoryAnalyzer';
 
 const OPEN_METEO_BASE = 'https://api.open-meteo.com/v1/forecast';
-const RAINVIEWER_BASE = 'https://api.rainviewer.com/public/weather-maps.json';
-const STORM_API_BASE = 'https://storm-n3iw.onrender.com/api/v2/storm/predict';
+// RainViewer discontinued free nowcast + satellite IR frames on 2026-01-01 and is
+// winding down its public API (past radar tiles remain). The endpoint is configurable
+// so a RainViewer-compatible provider can be swapped in without code changes — e.g. a
+// self-hosted LibreWXR instance, which adds a real 60-min optical-flow radar nowcast,
+// Italian DPC radar coverage and satellite imagery under the same /weather-maps.json shape.
+const RADAR_MAPS_URL = import.meta.env.VITE_RADAR_MAPS_URL || 'https://api.rainviewer.com/public/weather-maps.json';
 
 /**
  * Spherical Geometry Helpers for 100km Regional Storm Scanning
@@ -682,7 +686,13 @@ export function calculateConvectiveSounding(weatherData: WeatherResponse, stormR
 }
 
 /**
- * Generate real-time lightning strike telemetry around user location and convective cells
+ * Lightning strike telemetry.
+ *
+ * Real strike data requires a live lightning source (Blitzortung, EUMETSAT MTG LI,
+ * LibreWXR storm-cell detection, etc.). The previous implementation fabricated random
+ * strikes whenever a convective signal was present, which produced false
+ * "IMMEDIATE LIGHTNING DANGER ZONE" alerts that did not match real radar/satellite
+ * imagery. Until a real feed is wired in we return no strikes.
  */
 export function generateLightningTelemetry(
   userLat: number,
@@ -690,38 +700,7 @@ export function generateLightningTelemetry(
   weatherData: WeatherResponse,
   stormRisk?: StormRisk
 ): LightningStrike[] {
-  const strikes: LightningStrike[] = [];
-  const now = Date.now();
-  const weatherCode = weatherData.current?.weatherCode ?? 0;
-  const isStormy = weatherCode >= 95 || (stormRisk?.isCurrentlyStormy ?? false);
-  const regionalActive = (weatherData.regionalScanPoints || []).filter((p) => p.weatherCode >= 80 || p.precipitationMmH >= 1.0);
-
-  const strikeCount = isStormy ? 14 : regionalActive.length > 0 ? 6 : (stormRisk?.stormProbability ?? 0) > 0.4 ? 3 : 0;
-
-  if (strikeCount === 0) return [];
-
-  // Seeded strikes around active azimuth
-  for (let i = 0; i < strikeCount; i++) {
-    const ageMinutes = Math.round(i * 1.8 + Math.random() * 2);
-    const distKm = isStormy ? Math.round(2 + Math.random() * 18) : Math.round(15 + Math.random() * 65);
-    const bearing = (210 + (i * 25) + Math.random() * 20) % 360;
-    const dest = getDestinationPoint(userLat, userLon, distKm, bearing);
-
-    strikes.push({
-      id: `ltg-${now}-${i}`,
-      lat: dest.lat,
-      lon: dest.lon,
-      timestamp: now - ageMinutes * 60 * 1000,
-      ageMinutes,
-      distanceKm: distKm,
-      bearingDeg: Math.round(bearing),
-      polarity: Math.random() > 0.15 ? '-' : '+',
-      currentKa: Math.round((Math.random() > 0.15 ? -1 : 1) * (15 + Math.random() * 65))
-    });
-  }
-
-  strikes.sort((a, b) => a.distanceKm - b.distanceKm);
-  return strikes;
+  return [];
 }
 
 export function getCompassCardinal(deg: number): string {
@@ -1318,7 +1297,7 @@ export function generateMultiHazardAlerts(
  * Fetch radar metadata from RainViewer
  */
 export async function fetchRadarMaps(): Promise<RadarMapsResponse> {
-  const res = await fetch(RAINVIEWER_BASE);
+  const res = await fetch(RADAR_MAPS_URL);
   if (!res.ok) {
     throw new Error(`Failed to fetch radar maps: HTTP ${res.status}`);
   }
