@@ -83,3 +83,7 @@ lint/tmp/
 /radar_images/
 /api/radar_images/
 /api/app/radar_images/
+
+# Node.js dependencies & build output
+node_modules/
+dist/
