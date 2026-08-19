@@ -45,8 +45,11 @@ import { formatTime, getWindDirection } from '../utils/weatherUtils';
 import { t, getCurrentLanguage } from '../utils/i18n';
 import {
   isInItaly,
-  fetchLatestBulletinId,
+  resolveLatestBulletin,
   fetchBulletin,
+  formatBulletinDate,
+  formatBulletinTime,
+  isBulletinToday,
   fetchZones,
   zoneLevel,
   zoneProperties,
@@ -219,6 +222,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [showAllerte, setShowAllerte] = useState(true);
   const [allerteZones, setAllerteZones] = useState<FeatureCollection | null>(null);
   const [allerteBulletin, setAllerteBulletin] = useState<DpcBulletin | null>(null);
+  const [allerteResolution, setAllerteResolution] = useState<Awaited<ReturnType<typeof resolveLatestBulletin>> | null>(null);
   const [allerteLoading, setAllerteLoading] = useState(false);
   const [allerteError, setAllerteError] = useState<string | null>(null);
   const [dpcCells, setDpcCells] = useState<DpcRainCell[]>([]);
@@ -532,12 +536,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
   // Allerte — official DPC "Bollettino di Criticità" (warning zones + levels).
   // Bulletin is published once a day; refresh on a 30-min cadence.
-  const loadAllerte = useCallback(async () => {
+  const loadAllerte = useCallback(async (forceRefresh = false) => {
     setAllerteLoading(true);
     setAllerteError(null);
     try {
-      const id = await fetchLatestBulletinId(DPC_PROXY_URL);
-      const bulletin = await fetchBulletin(id);
+      const resolution = await resolveLatestBulletin(DPC_PROXY_URL, forceRefresh);
+      setAllerteResolution(resolution);
+      const bulletin = await fetchBulletin(resolution.id);
       setAllerteBulletin(bulletin);
       if (bulletin.today.topoUrl) {
         const zones = await fetchZones(bulletin.today.topoUrl);
@@ -1097,10 +1102,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
         const meta = LEVEL_META[level];
         return {
           color: meta.color,
-          weight: 1.1,
+          weight: level === 'red' ? 2.8 : level === 'orange' ? 2.4 : level === 'yellow' ? 2 : 1.25,
           fillColor: meta.fill,
-          fillOpacity: 0.3,
-          opacity: 0.85
+          fillOpacity: level === 'red' ? 0.68 : level === 'orange' ? 0.58 : level === 'yellow' ? 0.48 : 0.16,
+          opacity: 0.98
         };
       },
       onEachFeature: (f, lyr) => {

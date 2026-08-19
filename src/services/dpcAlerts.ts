@@ -49,6 +49,13 @@ export interface DpcBulletin {
   tomorrow: DpcBulletinDay;
 }
 
+export interface DpcBulletinResolution {
+  id: string;
+  source: 'render' | 'github';
+  endpoint: string;
+  checkedAt: string;
+}
+
 export interface DpcRainCell {
   lat: number;
   lon: number;
@@ -119,10 +126,10 @@ export function zoneProperties(props: Record<string, unknown>): DpcZonePropertie
 }
 
 export const LEVEL_META: Record<DpcAlertLevel, { label: string; color: string; fill: string; chip: string }> = {
-  none: { label: 'No alert', color: '#34d399', fill: '#059669', chip: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
-  yellow: { label: 'Yellow alert', color: '#facc15', fill: '#eab308', chip: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40' },
-  orange: { label: 'Orange alert', color: '#fb923c', fill: '#f97316', chip: 'bg-orange-500/15 text-orange-300 border-orange-500/40' },
-  red: { label: 'Red alert', color: '#f87171', fill: '#ef4444', chip: 'bg-red-500/15 text-red-300 border-red-500/40' }
+  none: { label: 'No alert', color: '#5eead4', fill: '#0f766e', chip: 'bg-teal-500/10 text-teal-300 border-teal-500/30' },
+  yellow: { label: 'Yellow alert', color: '#fde047', fill: '#ca8a04', chip: 'bg-yellow-500/20 text-yellow-200 border-yellow-400/60' },
+  orange: { label: 'Orange alert', color: '#fdba74', fill: '#ea580c', chip: 'bg-orange-500/20 text-orange-200 border-orange-400/60' },
+  red: { label: 'Red alert', color: '#fca5a5', fill: '#dc2626', chip: 'bg-red-500/20 text-red-200 border-red-400/60' }
 };
 
 export function stripHtml(html: string): string {
@@ -141,24 +148,35 @@ let bulletinCache: { at: number; id: string; bulletin: DpcBulletin } | null = nu
 let zonesCache: { at: number; url: string; zones: FeatureCollection } | null = null;
 
 /**
- * Resolve the id of the current bulletin. Prefers the Render proxy (which reads
- * the official DPC mappe portal server-side); falls back to the GitHub trees
- * API (single request, no CORS problem, heavier payload).
+ * Resolve the current bulletin and retain enough diagnostics for the UI to tell
+ * whether the configured Render endpoint is working or the direct official
+ * GitHub fallback was used. `refresh=1` bypasses proxy-side freshness caches.
  */
-export async function fetchLatestBulletinId(proxyUrl: string): Promise<string> {
-  if (proxyUrl) {
+export async function resolveLatestBulletin(proxyUrl: string, forceRefresh = false): Promise<DpcBulletinResolution> {
+  const endpoint = proxyUrl ? `${proxyUrl}/dpc/alerts/latest` : '';
+  if (endpoint) {
     try {
-      const res = await fetch(`${proxyUrl}/dpc/alerts/latest`);
+      const url = forceRefresh ? `${endpoint}?refresh=1` : endpoint;
+      const res = await fetch(url, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        if (data?.id) return String(data.id);
+        if (data?.id) {
+          return {
+            id: String(data.id),
+            source: 'render',
+            endpoint,
+            checkedAt: typeof data.checkedAt === 'string' ? data.checkedAt : new Date().toISOString()
+          };
+        }
       }
     } catch {
-      /* fall through to GitHub */
+      /* use the official browser-readable archive below */
     }
   }
+
   const res = await fetch(`https://api.github.com/repos/${DPC_BULLETIN_REPO}/git/trees/master?recursive=1`, {
-    headers: { accept: 'application/vnd.github+json' }
+    headers: { accept: 'application/vnd.github+json', 'cache-control': 'no-cache' },
+    cache: 'no-store'
   });
   if (!res.ok) throw new Error(`Could not reach the DPC bulletin index (HTTP ${res.status})`);
   const tree = (await res.json()) as { tree?: Array<{ path?: string }> };
@@ -168,7 +186,37 @@ export async function fetchLatestBulletinId(proxyUrl: string): Promise<string> {
     if (m && (!latest || m[1] > latest)) latest = m[1];
   }
   if (!latest) throw new Error('No DPC bulletins found in the official repository');
-  return latest;
+  return { id: latest, source: 'github', endpoint, checkedAt: new Date().toISOString() };
+}
+
+export async function fetchLatestBulletinId(proxyUrl: string, forceRefresh = false): Promise<string> {
+  return (await resolveLatestBulletin(proxyUrl, forceRefresh)).id;
+}
+
+export function formatBulletinDate(id: string, locale = 'en-GB'): string {
+  const match = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})$/.exec(id);
+  if (!match) return id;
+  const [, year, month, day] = match;
+  return new Intl.DateTimeFormat(locale, {
+    timeZone: 'UTC',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }).format(new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))));
+}
+
+export function formatBulletinTime(id: string): string {
+  const match = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})$/.exec(id);
+  return match ? `${match[4]}:${match[5]}` : '';
+}
+
+export function isBulletinToday(id: string): boolean {
+  const match = /^(\d{4})(\d{2})(\d{2})_/.exec(id);
+  if (!match) return false;
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date()).replace(/-/g, '');
+  return `${match[1]}${match[2]}${match[3]}` === today;
 }
 
 export async function fetchBulletin(id: string): Promise<DpcBulletin> {

@@ -15,7 +15,7 @@
  *   GET /dpc/frame?product=VMI&time=<ms>                → full colorized PNG (fallback)
  *   GET /dpc/cells?product=VMI&time=<ms>&lat=<lat>&lon=<lon>&radiusKm=150&minMmH=1
  *                                                     → connected rain cells (proximity alarm)
- *   GET /dpc/alerts/latest                             → { id } of the current Bollettino di Criticità
+ *   GET /dpc/alerts/latest[?refresh=1]                 → current bulletin id + source diagnostics
  *
  * Products: VMI, SRI, SRT1, CUM3..24, IR_108, plus VIL, ETM, POH, CAPPI_1..10.
  */
@@ -554,46 +554,65 @@ const MAPPE_BOLLETTINO =
   "https://mappe.protezionecivile.gov.it/page-data/it/mappe-rischi/bollettino-di-criticita/page-data.json";
 const latestBulletinCache = { at: 0, value: null };
 
-async function handleAlertsLatest() {
-  if (latestBulletinCache.value && Date.now() - latestBulletinCache.at < 30 * 60_000) {
+async function resolvePortalBulletinId() {
+  try {
+    const res = await fetch(MAPPE_BOLLETTINO, {
+      headers: { accept: "application/json", "cache-control": "no-cache" },
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text.match(/"field_data_bollettino"\s*:\s*"(\d{8}_\d{4})"/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveArchiveBulletinId() {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ALERT_REPO}/git/trees/master?recursive=1`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        "user-agent": "storm-alert-proxy",
+        "cache-control": "no-cache",
+      },
+    });
+    if (!res.ok) return null;
+    const tree = await res.json();
+    return (tree.tree || [])
+      .map((entry) => /^files\/(\d{8}_\d{4})\.json$/.exec(entry.path || "")?.[1] ?? null)
+      .filter(Boolean)
+      .sort()
+      .at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleAlertsLatest(url) {
+  const forceRefresh = url.searchParams.get("refresh") === "1";
+  if (!forceRefresh && latestBulletinCache.value && Date.now() - latestBulletinCache.at < 5 * 60_000) {
     return { status: 200, json: latestBulletinCache.value };
   }
 
-  // 1) DPC mappe portal embeds the current bulletin id (field_data_bollettino).
-  let id = null;
-  try {
-    const res = await fetch(MAPPE_BOLLETTINO, { headers: { accept: "application/json" } });
-    if (res.ok) {
-      const text = await res.text();
-      const m = text.match(/"field_data_bollettino"\s*:\s*"(\d{8}_\d{4})"/);
-      if (m) id = m[1];
-    }
-  } catch {
-    /* fall through to GitHub */
-  }
-
-  // 2) Fallback: GitHub git trees API — one request returns the whole file list.
-  if (!id) {
-    try {
-      const res = await fetch(`https://api.github.com/repos/${ALERT_REPO}/git/trees/master?recursive=1`, {
-        headers: { accept: "application/vnd.github+json", "user-agent": "storm-alert-proxy" },
-      });
-      if (res.ok) {
-        const tree = await res.json();
-        let latest = null;
-        for (const e of tree.tree || []) {
-          const m = /^files\/(\d{8}_\d{4})\.json$/.exec(e.path || "");
-          if (m && (!latest || m[1] > latest)) latest = m[1];
-        }
-        id = latest;
-      }
-    } catch {
-      /* fall through */
-    }
-  }
-
+  // Compare both authoritative DPC publication paths. The mappe portal can be
+  // CDN-stale for a few minutes after an update, while the official archive is
+  // updated independently. Taking the newest id prevents yesterday's bulletin.
+  const [portalId, archiveId] = await Promise.all([
+    resolvePortalBulletinId(),
+    resolveArchiveBulletinId(),
+  ]);
+  const ids = [portalId, archiveId].filter(Boolean).sort();
+  const id = ids.at(-1) ?? null;
   if (!id) return { status: 502, json: { error: "Could not resolve the latest DPC bulletin" } };
-  const value = { id, source: "protezionecivile.gov.it" };
+
+  const value = {
+    id,
+    portalId,
+    archiveId,
+    source: "DPC mappe portal + official pcm-dpc archive",
+    checkedAt: new Date().toISOString(),
+    endpoint: "/dpc/alerts/latest",
+  };
   latestBulletinCache.at = Date.now();
   latestBulletinCache.value = value;
   return { status: 200, json: value };
@@ -763,7 +782,7 @@ const server = http.createServer(async (req, res) => {
     } else if (url.pathname === "/dpc/cells") {
       result = await handleCells(url);
     } else if (url.pathname === "/dpc/alerts/latest") {
-      result = await handleAlertsLatest();
+      result = await handleAlertsLatest(url);
     } else if (url.pathname === "/dpc/frame") {
       result = await handleFrame(url);
     } else {
