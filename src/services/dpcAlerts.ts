@@ -210,13 +210,29 @@ export function formatBulletinTime(id: string): string {
   return match ? `${match[4]}:${match[5]}` : '';
 }
 
-export function isBulletinToday(id: string): boolean {
-  const match = /^(\d{4})(\d{2})(\d{2})_/.exec(id);
-  if (!match) return false;
-  const today = new Intl.DateTimeFormat('en-CA', {
+function romeDateKey(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).format(new Date()).replace(/-/g, '');
-  return `${match[1]}${match[2]}${match[3]}` === today;
+  }).format(date).replace(/-/g, '');
+}
+
+function bulletinDateKey(id: string): string | null {
+  const match = /^(\d{4})(\d{2})(\d{2})_/.exec(id);
+  return match ? `${match[1]}${match[2]}${match[3]}` : null;
+}
+
+export function bulletinAgeLabel(id: string): 'Today' | 'Yesterday' | 'Older bulletin' {
+  const key = bulletinDateKey(id);
+  if (!key) return 'Older bulletin';
+  const today = romeDateKey(new Date());
+  const dayDiff = Math.round((Date.parse(`${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}T00:00:00Z`) - Date.parse(`${key.slice(0, 4)}-${key.slice(4, 6)}-${key.slice(6)}T00:00:00Z`)) / 86_400_000);
+  if (dayDiff === 0) return 'Today';
+  if (dayDiff === 1) return 'Yesterday';
+  return 'Older bulletin';
+}
+
+export function isBulletinToday(id: string): boolean {
+  return bulletinAgeLabel(id) === 'Today';
 }
 
 export async function fetchBulletin(id: string): Promise<DpcBulletin> {
@@ -233,7 +249,7 @@ export async function fetchBulletin(id: string): Promise<DpcBulletin> {
   };
   const bulletin: DpcBulletin = {
     id,
-    name: raw.name ?? `Bollettino ${id}`,
+    name: `${bulletinAgeLabel(id)} · ${raw.name ?? `Bollettino ${id}`}`,
     date: raw.date ?? '',
     today: { description: raw.today?.html_descrition ?? '', topoUrl: raw.today?.topo_json ?? '' },
     tomorrow: { description: raw.tomorrow?.html_descrition ?? '', topoUrl: raw.tomorrow?.topo_json ?? '' }
