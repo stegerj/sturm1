@@ -8,7 +8,7 @@
  *
  * Endpoints:
  *   GET /healthz                                        → "ok"
- *   GET /dpc/frames?product=VMI&hours=2                 → { product, stepMinutes,
+ *   GET /dpc/frames?product=VMI&hours=5                 → { product, stepMinutes,
  *                                                            latest, frames, bounds }
  *   GET /dpc/tile?product=VMI&time=<ms>&z=<z>&x=<x>&y=<y> → 256×256 colorized tile
  *   GET /dpc/point?product=VMI&time=<ms>&lat=<lat>&lon=<lon> → value at location
@@ -18,6 +18,7 @@
  *   GET /dpc/alerts/latest[?refresh=1]                 → current bulletin id + source diagnostics
  *
  * Products: VMI, SRI, SRT1, CUM3..24, IR_108, plus VIL, ETM, POH, CAPPI_1..10.
+ * History requests are capped at 6 hours; the app currently uses 5 hours.
  */
 import http from "node:http";
 import { fromArrayBuffer } from "geotiff";

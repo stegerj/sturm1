@@ -178,6 +178,7 @@ const getLayerLegend = (layer: RadarLayerType) => {
 // Proxy base URL — your Render web service (set via VITE_DPC_PROXY_URL).
 // Without it, Italy tabs stay on the static latest-frame WMS feed.
 const DPC_PROXY_URL = ((import.meta.env.VITE_DPC_PROXY_URL as string | undefined) || '').replace(/\/+$/, '');
+const DPC_PLAYBACK_HOURS = 5;
 
 export const RadarView: React.FC<RadarViewProps> = ({
   weatherData,
@@ -266,11 +267,30 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const selectLayer = useCallback((layer: RadarLayerType) => {
     layerTouchedRef.current = true;
     setRadarLayerType(layer);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('storm-alert:radar-layer-changed', { detail: layer }));
+    }
   }, []);
 
   useEffect(() => {
     onDpcStormApproachingRef.current = onDpcStormApproaching;
   });
+
+  // The focused Italy selector uses the same layer state as the legacy layer bar.
+  useEffect(() => {
+    const onDpcLayerSelected = (event: Event) => {
+      const layer = (event as CustomEvent<RadarLayerType>).detail;
+      if (!DPC_TILED_LAYERS[layer]) return;
+      selectLayer(layer);
+    };
+    const onNowcastSelected = () => selectLayer('radar');
+    window.addEventListener('storm-alert:select-dpc-layer', onDpcLayerSelected);
+    window.addEventListener('storm-alert:select-radar-nowcast', onNowcastSelected);
+    return () => {
+      window.removeEventListener('storm-alert:select-dpc-layer', onDpcLayerSelected);
+      window.removeEventListener('storm-alert:select-radar-nowcast', onNowcastSelected);
+    };
+  }, [selectLayer]);
 
   // Default Italian users to the national DPC radar once their location resolves.
   useEffect(() => {
@@ -409,7 +429,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     setDpcError(null);
     setFrames([]); // clear any previous product's frames while loading
     try {
-      const res = await fetch(`${DPC_PROXY_URL}/dpc/frames?product=${product}&hours=2`);
+      const res = await fetch(`${DPC_PROXY_URL}/dpc/frames?product=${product}&hours=${DPC_PLAYBACK_HOURS}`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error ?? `Playback backend error (HTTP ${res.status})`);
@@ -435,7 +455,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
         setDpcBounds([[data.bounds.south, data.bounds.west], [data.bounds.north, data.bounds.east]]);
       }
       setDpcPlaybackActive(mapped.length > 0);
-      if (mapped.length === 0) setDpcError('No DPC frames available for the last 2 hours');
+      if (mapped.length === 0) setDpcError(`No DPC frames available for the last ${DPC_PLAYBACK_HOURS} hours`);
     } catch (err) {
       setDpcPlaybackActive(false);
       setDpcBounds(null);

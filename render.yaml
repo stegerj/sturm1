@@ -2,7 +2,7 @@
 #
 # This is the backend companion to the static Storm Alert site: it fetches
 # DPC's historical radar GeoTIFFs (CORS-blocked S3) and serves colorized PNG
-# frames so the Italy tabs can scrub/play the last 2 hours.
+# frames so the Italy tabs can scrub/play the last 5 hours.
 #
 # Deploy options:
 #   a) Dashboard: New → Web Service → connect this repo →

@@ -3,6 +3,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import { Navigation } from './components/Navigation';
 import { WeatherView } from './components/WeatherView';
 import { RadarView } from './components/RadarView';
+import { DpcProductControls } from './components/DpcProductControls';
 import { SettingsView } from './components/SettingsView';
 import { StormAlertModal } from './components/StormAlertModal';
 import { WeatherResponse, StormRisk, StormPredictionResponse, AppSettings } from './types';
@@ -192,7 +193,9 @@ export const App: React.FC = () => {
         )}
 
         {currentTab === 'radar' && (
-          <RadarView
+          <>
+            <DpcProductControls />
+            <RadarView
             weatherData={weatherData}
             prediction={prediction}
             stormRisk={stormRisk}
@@ -207,6 +210,7 @@ export const App: React.FC = () => {
             }}
             settings={settings}
           />
+          </>
         )}
 
         {currentTab === 'settings' && (
