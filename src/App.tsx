@@ -6,6 +6,7 @@ import { RadarView } from './components/RadarView';
 import { SettingsView } from './components/SettingsView';
 import { StormAlertModal } from './components/StormAlertModal';
 import { WeatherResponse, StormRisk, StormPredictionResponse, AppSettings } from './types';
+import type { DpcStormApproach } from './services/dpcAlerts';
 import { fetchCurrentWeather, analyzeStormRisk, generateStormPrediction } from './services/weatherApi';
 
 export const App: React.FC = () => {
@@ -34,6 +35,7 @@ export const App: React.FC = () => {
   });
 
   const [isAlertModalOpen, setIsAlertModalOpen] = useState<boolean>(false);
+  const [dpcStormRisk, setDpcStormRisk] = useState<StormRisk | null>(null);
   const [radarFocus, setRadarFocus] = useState<{ lat: number; lon: number; label?: string } | null>(null);
 
   // Load weather for location
@@ -124,6 +126,36 @@ export const App: React.FC = () => {
     setSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
+  // Proximity storm alarm — fired by RadarView when a DPC radar cell is on a
+  // collision course with the user's location. Opens the same siren modal with
+  // a DPC-radar-derived risk assessment.
+  const handleDpcStormApproaching = useCallback((info: DpcStormApproach) => {
+    if (!settings.enableAlerts) return;
+    const score = Math.min(
+      98,
+      Math.round(58 + Math.max(0, 45 - info.etaMinutes) * 0.8 + Math.min(12, info.intensity * 0.6))
+    );
+    setDpcStormRisk({
+      isCurrentlyStormy: false,
+      isStormApproaching: true,
+      stormProbability: 0.85,
+      estimatedTimeToStorm: Math.max(1, Math.round(info.etaMinutes)),
+      currentCondition: `DPC radar: ${info.intensity} mm/h rain cell ${info.distanceKm} km away`,
+      windSpeed: 0,
+      precipitationProbability: 95,
+      currentPrecipitation: info.intensity,
+      maxWindSpeedNext6Hours: 0,
+      overallRiskScore: score,
+      severityCategory: score >= 80 ? 'Severe' : score >= 65 ? 'High' : 'Moderate',
+      safetyAdvice: [
+        `Heavy rain (${info.intensity} mm/h) is tracking toward you — estimated arrival in ~${info.etaMinutes} minutes. Avoid low-lying areas and check the Protezione Civile allerte bulletin.`,
+        'If thunderstorm activity develops, move indoors away from windows and unplug sensitive electronics.',
+        'Monitor the DPC radar tab — the approaching cell is marked on the map with a red track line.'
+      ]
+    });
+    setIsAlertModalOpen(true);
+  }, [settings.enableAlerts]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <Navigation
@@ -165,6 +197,7 @@ export const App: React.FC = () => {
             prediction={prediction}
             stormRisk={stormRisk}
             focusCoordinates={radarFocus}
+            onDpcStormApproaching={handleDpcStormApproaching}
             onSelectLocation={(newLat, newLon, newName) => {
               setLat(newLat);
               setLon(newLon);
@@ -187,7 +220,7 @@ export const App: React.FC = () => {
       <StormAlertModal
         isOpen={isAlertModalOpen}
         onClose={() => setIsAlertModalOpen(false)}
-        stormRisk={stormRisk}
+        stormRisk={dpcStormRisk ?? stormRisk}
       />
     </div>
   );

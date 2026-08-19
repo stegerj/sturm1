@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import L from 'leaflet';
 import {
   Play,
@@ -43,6 +43,20 @@ import {
 import { fetchRadarMaps, generateStormPrediction } from '../services/weatherApi';
 import { formatTime, getWindDirection } from '../utils/weatherUtils';
 import { t, getCurrentLanguage } from '../utils/i18n';
+import {
+  isInItaly,
+  fetchLatestBulletinId,
+  fetchBulletin,
+  fetchZones,
+  zoneLevel,
+  zoneProperties,
+  pointInFeature,
+  LEVEL_META,
+  stripHtml,
+  haversineKm
+} from '../services/dpcAlerts';
+import type { DpcBulletin, DpcRainCell, DpcStormApproach } from '../services/dpcAlerts';
+import type { FeatureCollection, Feature } from 'geojson';
 
 interface RadarViewProps {
   weatherData: WeatherResponse | null;
@@ -51,6 +65,7 @@ interface RadarViewProps {
   onSelectLocation?: (lat: number, lon: number, locationName: string) => void;
   settings?: AppSettings;
   focusCoordinates?: { lat: number; lon: number; label?: string } | null;
+  onDpcStormApproaching?: (info: DpcStormApproach) => void;
 }
 
 type MapTheme = 'dark' | 'streets' | 'satellite';
@@ -167,7 +182,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
   stormRisk,
   onSelectLocation,
   settings,
-  focusCoordinates
+  focusCoordinates,
+  onDpcStormApproaching
 }) => {
   const currentLang = getCurrentLanguage(settings?.language);
   const [radarMaps, setRadarMaps] = useState<RadarMapsResponse | null>(null);
@@ -178,7 +194,11 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [prediction, setPrediction] = useState<StormPredictionResponse | null>(initialPrediction);
   const [loadingRadar, setLoadingRadar] = useState(true);
   const [mapTheme, setMapTheme] = useState<MapTheme>('dark');
-  const [radarLayerType, setRadarLayerType] = useState<RadarLayerType>('radar');
+  const [radarLayerType, setRadarLayerType] = useState<RadarLayerType>(() => {
+    const la = weatherData?.latitude ?? 52.52;
+    const lo = weatherData?.longitude ?? 13.405;
+    return isInItaly(la, lo) ? 'dpc-vmi' : 'radar';
+  });
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [showRangeRings, setShowRangeRings] = useState<boolean>(true);
   const [showVectorArrow, setShowVectorArrow] = useState<boolean>(true);
@@ -196,6 +216,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [dpcLoading, setDpcLoading] = useState(false);
   const [dpcError, setDpcError] = useState<string | null>(null);
   const [dpcPoint, setDpcPoint] = useState<{ value: number | null; unit: string; reason: string } | null>(null);
+  const [showAllerte, setShowAllerte] = useState(true);
+  const [allerteZones, setAllerteZones] = useState<FeatureCollection | null>(null);
+  const [allerteBulletin, setAllerteBulletin] = useState<DpcBulletin | null>(null);
+  const [allerteLoading, setAllerteLoading] = useState(false);
+  const [allerteError, setAllerteError] = useState<string | null>(null);
+  const [dpcCells, setDpcCells] = useState<DpcRainCell[]>([]);
+  const [dpcApproach, setDpcApproach] = useState<DpcStormApproach | null>(null);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -209,6 +236,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const dpcTileBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
   const dpcTileTemplateRef = useRef<string | null>(null);
   const frameBusyRef = useRef(false);
+  const layerTouchedRef = useRef(false);
+  const allerteLayerRef = useRef<L.GeoJSON | null>(null);
+  const onDpcStormApproachingRef = useRef(onDpcStormApproaching);
+  const lastApproachTriggerRef = useRef<{ at: number; intensity: number; eta: number } | null>(null);
 
   // Live second clock for accurate timestamp HUD
   useEffect(() => {
@@ -221,6 +252,25 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const lat = weatherData?.latitude ?? 52.52;
   const lon = weatherData?.longitude ?? 13.405;
   const locationName = weatherData?.locationName || `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`;
+
+  // Manual layer picker — marks that the user has made an explicit choice so
+  // the Italy auto-default below never overrides it.
+  const selectLayer = useCallback((layer: RadarLayerType) => {
+    layerTouchedRef.current = true;
+    setRadarLayerType(layer);
+  }, []);
+
+  useEffect(() => {
+    onDpcStormApproachingRef.current = onDpcStormApproaching;
+  });
+
+  // Default Italian users to the national DPC radar once their location resolves.
+  useEffect(() => {
+    if (!weatherData) return;
+    if (!layerTouchedRef.current && isInItaly(weatherData.latitude, weatherData.longitude)) {
+      setRadarLayerType((prev) => (DPC_PLAYBACK_PRODUCT[prev] ? prev : 'dpc-vmi'));
+    }
+  }, [weatherData]);
 
   // Helper to get exact image / scan acquisition timestamp info for current view
   const getImageTimestampInfo = () => {
@@ -480,6 +530,130 @@ export const RadarView: React.FC<RadarViewProps> = ({
     };
   }, [radarLayerType, currentFrameIndex, dpcPlaybackActive, frames, weatherData?.latitude, weatherData?.longitude]);
 
+  // Allerte — official DPC "Bollettino di Criticità" (warning zones + levels).
+  // Bulletin is published once a day; refresh on a 30-min cadence.
+  const loadAllerte = useCallback(async () => {
+    setAllerteLoading(true);
+    setAllerteError(null);
+    try {
+      const id = await fetchLatestBulletinId(DPC_PROXY_URL);
+      const bulletin = await fetchBulletin(id);
+      setAllerteBulletin(bulletin);
+      if (bulletin.today.topoUrl) {
+        const zones = await fetchZones(bulletin.today.topoUrl);
+        setAllerteZones(zones);
+      }
+    } catch (err) {
+      setAllerteError(err instanceof Error ? err.message : 'Allerte unavailable');
+    } finally {
+      setAllerteLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAllerte();
+    const timer = setInterval(loadAllerte, 30 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [loadAllerte]);
+
+  // Proximity storm alarm — track DPC rain cells between consecutive frames,
+  // project their track toward the user and raise the siren modal on a collision.
+  useEffect(() => {
+    const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+    if (!product || !DPC_PROXY_URL || !dpcPlaybackActive || frames.length < 2) {
+      setDpcCells([]);
+      setDpcApproach(null);
+      return;
+    }
+    if (weatherData?.latitude === undefined || weatherData?.longitude === undefined) return;
+    const uLat = weatherData.latitude;
+    const uLon = weatherData.longitude;
+    let cancelled = false;
+
+    const analyze = async () => {
+      const t2 = frames[frames.length - 1].time * 1000;
+      const t1 = frames[Math.max(0, frames.length - 2)].time * 1000;
+      const base = `${DPC_PROXY_URL}/dpc/cells?product=${product}&lat=${uLat}&lon=${uLon}&radiusKm=150&minMmH=1`;
+      try {
+        const [r2, r1] = await Promise.all([
+          fetch(`${base}&time=${t2}`).then((r) => (r.ok ? r.json() : null)),
+          t1 !== t2 ? fetch(`${base}&time=${t1}`).then((r) => (r.ok ? r.json() : null)) : Promise.resolve(null)
+        ]);
+        if (cancelled) return;
+        const cells2: DpcRainCell[] = r2?.cells ?? [];
+        setDpcCells(cells2.slice(0, 10));
+        const dtHours = (t2 - t1) / 3_600_000;
+        const cells1: DpcRainCell[] = r1?.cells ?? [];
+        if (dtHours <= 0) return;
+
+        let best: DpcStormApproach | null = null;
+        for (const c of cells2) {
+          if (c.maxMmH < 2.5) continue;
+          // Match to the nearest cell in the previous frame (storms move ~3-5 km/frame).
+          let nearest: DpcRainCell | null = null;
+          let nd = 40;
+          for (const p of cells1) {
+            const d = haversineKm(c.lat, c.lon, p.lat, p.lon);
+            if (d < nd) {
+              nd = d;
+              nearest = p;
+            }
+          }
+          if (!nearest) continue;
+          const cosU = Math.cos((uLat * Math.PI) / 180);
+          const vN = ((c.lat - nearest.lat) * 110.574) / dtHours;
+          const vE = ((c.lon - nearest.lon) * 111.32 * cosU) / dtHours;
+          const speed = Math.hypot(vN, vE);
+          if (speed < 4) continue; // static speckle / radar noise
+          const n0 = (c.lat - uLat) * 110.574;
+          const e0 = (c.lon - uLon) * 111.32 * cosU;
+          const v2 = vN * vN + vE * vE;
+          const tStar = -(n0 * vN + e0 * vE) / v2;
+          if (tStar <= 0 || tStar > 3) continue; // moving away or too far out
+          const miss = Math.abs(n0 * vE - e0 * vN) / Math.sqrt(v2);
+          if (miss > 35) continue;
+          const etaMin = tStar * 60;
+          if (!best || etaMin < best.etaMinutes) {
+            best = {
+              etaMinutes: Math.round(etaMin),
+              intensity: c.maxMmH,
+              distanceKm: Math.round(c.distanceKm),
+              speedKmH: Math.round(speed),
+              headingDeg: Math.round(((Math.atan2(vE, vN) * 180) / Math.PI + 360) % 360),
+              cellLat: c.lat,
+              cellLon: c.lon
+            };
+          }
+        }
+        setDpcApproach(best);
+        if (best && best.etaMinutes <= 45 && best.intensity >= 2.5) {
+          const last = lastApproachTriggerRef.current;
+          const now = Date.now();
+          const shouldFire =
+            !last ||
+            now - last.at > 15 * 60_000 ||
+            (best.intensity > last.intensity * 1.3 && best.etaMinutes < last.eta);
+          if (shouldFire) {
+            lastApproachTriggerRef.current = { at: now, intensity: best.intensity, eta: best.etaMinutes };
+            onDpcStormApproachingRef.current?.(best);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setDpcCells([]);
+          setDpcApproach(null);
+        }
+      }
+    };
+
+    analyze();
+    const timer = setInterval(analyze, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [radarLayerType, dpcPlaybackActive, frames, weatherData?.latitude, weatherData?.longitude]);
+
   // Base map URL generator
   const getBaseMapUrl = (theme: MapTheme) => {
     switch (theme) {
@@ -559,6 +733,11 @@ export const RadarView: React.FC<RadarViewProps> = ({
     if (!map.getPane('contoursPane')) {
       const p = map.createPane('contoursPane');
       p.style.zIndex = '450';
+      p.style.pointerEvents = 'none';
+    }
+    if (!map.getPane('allertePane')) {
+      const p = map.createPane('allertePane');
+      p.style.zIndex = '400';
       p.style.pointerEvents = 'none';
     }
     if (!map.getPane('labelsPane')) {
@@ -902,6 +1081,44 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, [radarLayerType, radarOpacity, getOverlayTileConfig, frames, currentFrameIndex, smoothRadar, colorScheme, dpcPlaybackActive, dpcBounds]);
 
+  // Allerte zone overlay — DPC warning zones colored by criticality level.
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    if (allerteLayerRef.current) {
+      map.removeLayer(allerteLayerRef.current);
+      allerteLayerRef.current = null;
+    }
+    if (!showAllerte || !allerteZones) return;
+    const layer = L.geoJSON(allerteZones, {
+      pane: 'allertePane',
+      style: (f) => {
+        const level = zoneLevel((f?.properties ?? {}) as Record<string, unknown>);
+        const meta = LEVEL_META[level];
+        return {
+          color: meta.color,
+          weight: 1.1,
+          fillColor: meta.fill,
+          fillOpacity: 0.3,
+          opacity: 0.85
+        };
+      },
+      onEachFeature: (f, lyr) => {
+        const props = zoneProperties((f?.properties ?? {}) as Record<string, unknown>);
+        const meta = LEVEL_META[zoneLevel((f?.properties ?? {}) as Record<string, unknown>)];
+        const comuni =
+          props.municipalities.length > 4
+            ? `${props.municipalities.slice(0, 4).join(', ')}… (+${props.municipalities.length - 4})`
+            : props.municipalities.join(', ');
+        lyr.bindTooltip(
+          `<div class="p-1.5 text-slate-900 text-xs max-w-[240px]"><strong>${props.zoneName}</strong><br/><span class="font-bold" style="color:${meta.color}">${meta.label}</span><div class="text-[10px] text-slate-600 mt-1">${comuni}</div></div>`,
+          { sticky: true }
+        );
+      }
+    }).addTo(map);
+    allerteLayerRef.current = layer;
+  }, [showAllerte, allerteZones]);
+
   // Draw Range Rings & Detected Rain Cell Overlays on Map
   useEffect(() => {
     if (!overlayGroupRef.current || !mapInstanceRef.current) return;
@@ -1085,7 +1302,50 @@ export const RadarView: React.FC<RadarViewProps> = ({
         overlayGroupRef.current?.addLayer(strikeMarker);
       });
     }
-  }, [lat, lon, showRangeRings, showVectorArrow, prediction, weatherData, radarLayerType]);
+
+    // 5. DPC radar rain cells (Italy playback) — intensity-scaled markers
+    // 6. Approaching-cell track line (proximity storm alarm)
+    if (dpcPlaybackActive && dpcCells.length > 0) {
+      dpcCells.forEach((cell) => {
+        const color = cell.maxMmH >= 10 ? '#ef4444' : cell.maxMmH >= 5 ? '#f59e0b' : '#38bdf8';
+        const marker = L.circleMarker([cell.lat, cell.lon], {
+          radius: Math.min(14, 5 + cell.maxMmH * 0.5),
+          fillColor: color,
+          color: '#ffffff',
+          weight: 1.5,
+          fillOpacity: 0.75
+        });
+        marker.bindTooltip(
+          `<div class="p-1 text-slate-900 text-xs"><strong>${cell.maxMmH} mm/h rain cell</strong><br/>${cell.distanceKm} km ${getWindDirection(cell.bearingDeg)}</div>`
+        );
+        overlayGroupRef.current?.addLayer(marker);
+      });
+    }
+
+    if (dpcApproach) {
+      const { cellLat, cellLon, headingDeg, etaMinutes, intensity } = dpcApproach;
+      const endLat = cellLat + (45 / 110.574) * Math.cos((headingDeg * Math.PI) / 180);
+      const endLon =
+        cellLon + (45 / (111.32 * Math.cos((cellLat * Math.PI) / 180))) * Math.sin((headingDeg * Math.PI) / 180);
+      const line = L.polyline(
+        [
+          [cellLat, cellLon],
+          [endLat, endLon]
+        ],
+        { color: '#f43f5e', weight: 3, dashArray: '6, 5', opacity: 0.95 }
+      );
+      line.bindTooltip(`Approaching rain: ETA ~${etaMinutes} min, ${intensity} mm/h`);
+      overlayGroupRef.current?.addLayer(line);
+      const head = L.circleMarker([endLat, endLon], {
+        radius: 6,
+        fillColor: '#f43f5e',
+        color: '#ffffff',
+        weight: 2,
+        fillOpacity: 1
+      });
+      overlayGroupRef.current?.addLayer(head);
+    }
+  }, [lat, lon, showRangeRings, showVectorArrow, prediction, weatherData, radarLayerType, dpcPlaybackActive, dpcCells, dpcApproach]);
 
   // Animation Loop for Radar/Satellite Frames — advances only after the
   // current frame's tiles have actually painted (frameBusyRef), so playback
@@ -1173,6 +1433,22 @@ export const RadarView: React.FC<RadarViewProps> = ({
     (p) => p.precipitationMmH >= 0.1 || p.next1hPrecipMmH >= 0.2 || p.weatherCode >= 50
   );
 
+  const rank = { none: 0, yellow: 1, orange: 2, red: 3 } as const;
+  const allerteStats = useMemo(() => {
+    if (!allerteZones) return null;
+    const features = allerteZones.features as Feature[];
+    const myZones = features.filter((f) => pointInFeature(f, lat, lon));
+    const alerting = features
+      .map((f) => ({
+        feature: f,
+        level: zoneLevel((f.properties ?? {}) as Record<string, unknown>),
+        props: zoneProperties((f.properties ?? {}) as Record<string, unknown>)
+      }))
+      .filter((x) => x.level !== 'none')
+      .sort((a, b) => rank[b.level] - rank[a.level]);
+    return { myZones, alerting };
+  }, [allerteZones, lat, lon]);
+
   return (
     <div className="w-full px-2 sm:px-4 py-4 space-y-4 mb-24 animate-fadeIn">
       {/* Top Header & Layer Mode Switcher */}
@@ -1202,7 +1478,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
             <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 overflow-x-auto max-w-full">
             {/* Doppler Radar */}
             <button
-              onClick={() => setRadarLayerType('radar')}
+              onClick={() => selectLayer('radar')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'radar'
                   ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
@@ -1215,7 +1491,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* MTG TrueColour GeoColour */}
             <button
-              onClick={() => setRadarLayerType('mtg-truecolor')}
+              onClick={() => selectLayer('mtg-truecolor')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'mtg-truecolor'
                   ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
@@ -1229,7 +1505,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* MTG Severe Convection RGB */}
             <button
-              onClick={() => setRadarLayerType('mtg-convection')}
+              onClick={() => selectLayer('mtg-convection')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'mtg-convection'
                   ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
@@ -1243,7 +1519,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* MTG Cloud Top Temperatures (CTTH IR) */}
             <button
-              onClick={() => setRadarLayerType('mtg-cloudtop')}
+              onClick={() => selectLayer('mtg-cloudtop')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'mtg-cloudtop'
                   ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20'
@@ -1257,7 +1533,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* MTG Lightning Imager (LI) */}
             <button
-              onClick={() => setRadarLayerType('mtg-li')}
+              onClick={() => selectLayer('mtg-li')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'mtg-li'
                   ? 'bg-yellow-500 text-slate-950 font-black shadow-md shadow-yellow-500/20'
@@ -1271,7 +1547,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* Live EUMETSAT Natural Colour (15-min) */}
             <button
-              onClick={() => setRadarLayerType('eumetsat-natural')}
+              onClick={() => selectLayer('eumetsat-natural')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'eumetsat-natural'
                   ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
@@ -1285,7 +1561,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* Live EUMETSAT Thermal IR 10.8µm (24/7 Day/Night) */}
             <button
-              onClick={() => setRadarLayerType('eumetsat-ir')}
+              onClick={() => selectLayer('eumetsat-ir')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'eumetsat-ir'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
@@ -1299,7 +1575,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
             {/* DWD European Satellite Composite */}
             <button
-              onClick={() => setRadarLayerType('dwd-sat')}
+              onClick={() => selectLayer('dwd-sat')}
               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                 radarLayerType === 'dwd-sat'
                   ? 'bg-slate-700 text-white shadow-md'
@@ -1318,7 +1594,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
             <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-teal-800/60 overflow-x-auto max-w-full">
               {/* VMI rain intensity */}
               <button
-                onClick={() => setRadarLayerType('dpc-vmi')}
+                onClick={() => selectLayer('dpc-vmi')}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                   radarLayerType === 'dpc-vmi'
                     ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
@@ -1332,7 +1608,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
               {/* SRI surface rain intensity */}
               <button
-                onClick={() => setRadarLayerType('dpc-sri')}
+                onClick={() => selectLayer('dpc-sri')}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                   radarLayerType === 'dpc-sri'
                     ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
@@ -1346,7 +1622,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
               {/* National composite reflectivity */}
               <button
-                onClick={() => setRadarLayerType('dpc-dbz')}
+                onClick={() => selectLayer('dpc-dbz')}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                   radarLayerType === 'dpc-dbz'
                     ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
@@ -1362,7 +1638,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
               {(['dpc-srt1', 'dpc-srt3', 'dpc-srt6', 'dpc-srt12', 'dpc-srt24'] as RadarLayerType[]).map((layerId) => (
                 <button
                   key={layerId}
-                  onClick={() => setRadarLayerType(layerId)}
+                  onClick={() => selectLayer(layerId)}
                   className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                     radarLayerType === layerId
                       ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
@@ -1377,7 +1653,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
               {/* IR satellite */}
               <button
-                onClick={() => setRadarLayerType('dpc-ir')}
+                onClick={() => selectLayer('dpc-ir')}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
                   radarLayerType === 'dpc-ir'
                     ? 'bg-teal-700 text-white shadow-md shadow-teal-700/20'
@@ -1555,6 +1831,20 @@ export const RadarView: React.FC<RadarViewProps> = ({
                   />
                 </label>
 
+                {/* DPC Allerte Warning Zones Toggle */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer text-xs group">
+                  <span className="text-slate-200 font-medium group-hover:text-white flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+                    <span>Allerte DPC (warning zones)</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={showAllerte}
+                    onChange={(e) => setShowAllerte(e.target.checked)}
+                    className="rounded accent-red-500 w-4 h-4 cursor-pointer"
+                  />
+                </label>
+
                 {/* Range Rings Toggle */}
                 <label className="flex items-center justify-between gap-2 cursor-pointer text-xs group">
                   <span className="text-slate-200 font-medium group-hover:text-white flex items-center gap-1.5">
@@ -1696,6 +1986,12 @@ export const RadarView: React.FC<RadarViewProps> = ({
                     : `No precipitation over ${locationName} right now`}
                 </div>
               )}
+              {dpcApproach && (
+                <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold bg-rose-500/15 border-rose-500/40 text-rose-300 animate-pulse">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  Rain cell {dpcApproach.distanceKm} km away • ETA ~{dpcApproach.etaMinutes} min • {dpcApproach.intensity} mm/h
+                </div>
+              )}
             </div>
           </div>
           {DPC_PROXY_URL && !dpcLoading && (
@@ -1706,6 +2002,113 @@ export const RadarView: React.FC<RadarViewProps> = ({
               <RefreshCw className="w-3.5 h-3.5 text-teal-400" />
               Refresh frames
             </button>
+          )}
+        </div>
+      )}
+
+      {/* Allerte — official DPC Bollettino di Criticità (warning zones + levels) */}
+      {(isInItaly(lat, lon) || DPC_TILED_LAYERS[radarLayerType]) && (
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                  <span>Allerte — Bollettino di Criticità</span>
+                  {allerteBulletin && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                      {allerteBulletin.name}
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">
+                  Official DPC warning zones — hydrogeological / hydraulic / thunderstorm criticality (published daily)
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => loadAllerte()}
+              className="px-3.5 py-2 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-red-400 ${allerteLoading ? 'animate-spin' : ''}`} />
+              Refresh bulletin
+            </button>
+          </div>
+
+          {allerteLoading && !allerteBulletin && (
+            <div className="text-xs text-slate-400 flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
+              Loading the latest DPC bulletin…
+            </div>
+          )}
+          {allerteError && !allerteBulletin && (
+            <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded-2xl p-3">
+              {allerteError} — the official bulletin is published once a day (~13:00 CET); try again later.
+            </div>
+          )}
+
+          {allerteBulletin && (
+            <div className="space-y-4">
+              {allerteStats && (
+                <div className="space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    Your warning zone
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {allerteStats.myZones.length > 0 ? (
+                      allerteStats.myZones.slice(0, 3).map((f, i) => {
+                        const props = zoneProperties((f.properties ?? {}) as Record<string, unknown>);
+                        const meta = LEVEL_META[zoneLevel((f.properties ?? {}) as Record<string, unknown>)];
+                        return (
+                          <span key={i} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold ${meta.chip}`}>
+                            <MapPin className="w-3.5 h-3.5" />
+                            {props.zoneName}
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="text-xs text-slate-400">
+                        Location not covered by the national bulletin (outside Italy).
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 leading-relaxed whitespace-pre-line">
+                {stripHtml(allerteBulletin.today.description)}
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-slate-950/50 border border-slate-800/70 text-xs text-slate-400 leading-relaxed whitespace-pre-line">
+                <span className="font-bold text-slate-200">Tomorrow: </span>
+                {stripHtml(allerteBulletin.tomorrow.description) || 'No forecast published yet.'}
+              </div>
+
+              {allerteStats && allerteStats.alerting.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    {allerteStats.alerting.length} zone(s) under alert today
+                  </div>
+                  <div className="max-h-44 overflow-y-auto scrollbar-thin space-y-1 pr-1">
+                    {allerteStats.alerting.slice(0, 12).map((x, i) => {
+                      const meta = LEVEL_META[x.level];
+                      return (
+                        <div key={i} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-slate-950/70 border border-slate-800/80 text-xs">
+                          <span className="text-slate-200 font-medium truncate">{x.props.zoneName}</span>
+                          <span className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border ${meta.chip}`}>{meta.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="text-[10px] text-slate-500">
+                Source: Protezione Civile — Bollettino di Criticità (pcm-dpc open data). Zone colors match the official map.
+              </div>
+            </div>
           )}
         </div>
       )}

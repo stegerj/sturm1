@@ -13,6 +13,9 @@
  *   GET /dpc/tile?product=VMI&time=<ms>&z=<z>&x=<x>&y=<y> → 256×256 colorized tile
  *   GET /dpc/point?product=VMI&time=<ms>&lat=<lat>&lon=<lon> → value at location
  *   GET /dpc/frame?product=VMI&time=<ms>                → full colorized PNG (fallback)
+ *   GET /dpc/cells?product=VMI&time=<ms>&lat=<lat>&lon=<lon>&radiusKm=150&minMmH=1
+ *                                                     → connected rain cells (proximity alarm)
+ *   GET /dpc/alerts/latest                             → { id } of the current Bollettino di Criticità
  *
  * Products: VMI, SRI, SRT1, CUM3..24, IR_108, plus VIL, ETM, POH, CAPPI_1..10.
  */
@@ -143,6 +146,7 @@ const frameListCache = new Map();
 const pngCache = new Map();
 const tileCache = new Map();
 const boundsCache = new Map();
+const cellsCache = new Map();
 const tiffCache = new Map(); // product:time -> { img, w, h, origin, res }
 
 function cacheSet(map, key, at, value, cap = 500) {
@@ -540,6 +544,197 @@ async function handleFrame(url) {
 }
 
 // ---------------------------------------------------------------------------
+// DPC Allerte — official 'Bollettino di Criticità' published by Protezione
+// Civile as JSON + TopoJSON on their GitHub org (pcm-dpc). The mappe portal
+// embeds the id of the current bulletin; resolve it here so the browser never
+// needs CORS to DPC (and GitHub rate limits stay server-side).
+// ---------------------------------------------------------------------------
+const ALERT_REPO = "pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica";
+const MAPPE_BOLLETTINO =
+  "https://mappe.protezionecivile.gov.it/page-data/it/mappe-rischi/bollettino-di-criticita/page-data.json";
+const latestBulletinCache = { at: 0, value: null };
+
+async function handleAlertsLatest() {
+  if (latestBulletinCache.value && Date.now() - latestBulletinCache.at < 30 * 60_000) {
+    return { status: 200, json: latestBulletinCache.value };
+  }
+
+  // 1) DPC mappe portal embeds the current bulletin id (field_data_bollettino).
+  let id = null;
+  try {
+    const res = await fetch(MAPPE_BOLLETTINO, { headers: { accept: "application/json" } });
+    if (res.ok) {
+      const text = await res.text();
+      const m = text.match(/"field_data_bollettino"\s*:\s*"(\d{8}_\d{4})"/);
+      if (m) id = m[1];
+    }
+  } catch {
+    /* fall through to GitHub */
+  }
+
+  // 2) Fallback: GitHub git trees API — one request returns the whole file list.
+  if (!id) {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${ALERT_REPO}/git/trees/master?recursive=1`, {
+        headers: { accept: "application/vnd.github+json", "user-agent": "storm-alert-proxy" },
+      });
+      if (res.ok) {
+        const tree = await res.json();
+        let latest = null;
+        for (const e of tree.tree || []) {
+          const m = /^files\/(\d{8}_\d{4})\.json$/.exec(e.path || "");
+          if (m && (!latest || m[1] > latest)) latest = m[1];
+        }
+        id = latest;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  if (!id) return { status: 502, json: { error: "Could not resolve the latest DPC bulletin" } };
+  const value = { id, source: "protezionecivile.gov.it" };
+  latestBulletinCache.at = Date.now();
+  latestBulletinCache.value = value;
+  return { status: 200, json: value };
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const f1 = (lat1 * Math.PI) / 180;
+  const f2 = (lat2 * Math.PI) / 180;
+  const dl = ((lon2 - lon1) * Math.PI) / 180;
+  const y = Math.sin(dl) * Math.cos(f2);
+  const x = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+// ---------------------------------------------------------------------------
+// Rain-cell detection — scan a window of the raster around a location and
+// return connected components above an intensity threshold (proximity alarm).
+// ---------------------------------------------------------------------------
+async function handleCells(url) {
+  const product = (url.searchParams.get("product") ?? "VMI").toUpperCase();
+  const time = Number(url.searchParams.get("time"));
+  const lat = Number(url.searchParams.get("lat"));
+  const lon = Number(url.searchParams.get("lon"));
+  const radiusKm = Math.min(300, Math.max(10, Number(url.searchParams.get("radiusKm") ?? 150) || 150));
+  const minMmH = Math.max(0.1, Number(url.searchParams.get("minMmH") ?? 1) || 1);
+  if (!Number.isFinite(time) || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return { status: 400, json: { error: "time/lat/lon required" } };
+  }
+
+  const cacheKey = `${product}:${time}:${lat.toFixed(3)}:${lon.toFixed(3)}:${radiusKm}:${minMmH}`;
+  const cached = cellsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 90_000) {
+    return { status: 200, json: cached.value };
+  }
+
+  const entry = await getRaster(product, time);
+  if (!entry) return { status: 404, json: { error: "frame not found" } };
+
+  const [cx, cy] = crsToPixel(entry, ...toDpc.forward([lon, lat]));
+  const { w, h } = entry;
+  const empty = { product, time, radiusKm, minMmH, cells: [] };
+  if (cx < 0 || cy < 0 || cx >= w || cy >= h) {
+    cacheSet(cellsCache, cacheKey, Date.now(), empty);
+    return { status: 200, json: empty };
+  }
+
+  const res = Math.min(entry.res[0], Math.abs(entry.res[1]));
+  const halfPx = Math.max(4, Math.ceil((radiusKm * 1000) / res));
+  const x0 = Math.max(0, Math.floor(cx - halfPx));
+  const y0 = Math.max(0, Math.floor(cy - halfPx));
+  const x1 = Math.min(w, Math.ceil(cx + halfPx));
+  const y1 = Math.min(h, Math.ceil(cy + halfPx));
+  const winW = x1 - x0;
+  const winH = y1 - y0;
+  if (winW <= 0 || winH <= 0) {
+    cacheSet(cellsCache, cacheKey, Date.now(), empty);
+    return { status: 200, json: empty };
+  }
+
+  const rasters = await entry.img.readRasters({ window: [x0, y0, x1, y1] });
+  const band = rasters[0];
+  const visited = new Uint8Array(winW * winH);
+  const cells = [];
+
+  for (let py = 0; py < winH; py++) {
+    for (let px = 0; px < winW; px++) {
+      const idx = py * winW + px;
+      if (visited[idx]) continue;
+      const v = band[idx];
+      if (typeof v !== "number" || !Number.isFinite(v) || v < minMmH) {
+        visited[idx] = 1;
+        continue;
+      }
+
+      // Flood-fill this component (8-connectivity).
+      const stack = [[px, py]];
+      visited[idx] = 1;
+      let sum = 0;
+      let max = v;
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      while (stack.length) {
+        const [qx, qy] = stack.pop();
+        const qi = qy * winW + qx;
+        const qv = band[qi];
+        sum += qv;
+        n++;
+        if (qv > max) max = qv;
+        sx += qx;
+        sy += qy;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = qx + dx;
+            const ny = qy + dy;
+            if (nx < 0 || ny < 0 || nx >= winW || ny >= winH) continue;
+            const ni = ny * winW + nx;
+            if (visited[ni]) continue;
+            const nv = band[ni];
+            visited[ni] = 1;
+            if (typeof nv === "number" && Number.isFinite(nv) && nv >= minMmH) {
+              stack.push([nx, ny]);
+            }
+          }
+        }
+      }
+      if (n < 3) continue; // drop single-pixel speckle
+
+      const [clon, clat] = toWgs.forward(pixelToCrs(entry, x0 + sx / n, y0 + sy / n));
+      const d = haversineKm(lat, lon, clat, clon);
+      cells.push({
+        lat: clat,
+        lon: clon,
+        maxMmH: Math.round(max * 100) / 100,
+        meanMmH: Math.round((sum / n) * 100) / 100,
+        areaPx: n,
+        areaKm2: Math.round((n * res * res) / 1e6 * 10) / 10,
+        distanceKm: Math.round(d * 10) / 10,
+        bearingDeg: Math.round(bearingDeg(lat, lon, clat, clon)),
+      });
+    }
+  }
+
+  cells.sort((a, b) => b.maxMmH - a.maxMmH);
+  const value = { product, time, radiusKm, minMmH, cells: cells.slice(0, 12) };
+  cacheSet(cellsCache, cacheKey, Date.now(), value);
+  return { status: 200, json: value };
+}
+
+// ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
@@ -565,6 +760,10 @@ const server = http.createServer(async (req, res) => {
       result = await handleTile(url);
     } else if (url.pathname === "/dpc/point") {
       result = await handlePoint(url);
+    } else if (url.pathname === "/dpc/cells") {
+      result = await handleCells(url);
+    } else if (url.pathname === "/dpc/alerts/latest") {
+      result = await handleAlertsLatest();
     } else if (url.pathname === "/dpc/frame") {
       result = await handleFrame(url);
     } else {
