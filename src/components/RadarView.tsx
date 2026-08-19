@@ -219,6 +219,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [dpcLoading, setDpcLoading] = useState(false);
   const [dpcError, setDpcError] = useState<string | null>(null);
   const [dpcPoint, setDpcPoint] = useState<{ value: number | null; unit: string; reason: string } | null>(null);
+  const [dpcTileSupported, setDpcTileSupported] = useState(false);
   const [showAllerte, setShowAllerte] = useState(true);
   const [allerteZones, setAllerteZones] = useState<FeatureCollection | null>(null);
   const [allerteBulletin, setAllerteBulletin] = useState<DpcBulletin | null>(null);
@@ -239,7 +240,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const dpcTileLayerRef = useRef<L.TileLayer | null>(null);
   const dpcTileBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
   const dpcTileTemplateRef = useRef<string | null>(null);
-  const frameBusyRef = useRef(false);
+  const dpcImageOverlayRef = useRef<L.ImageOverlay | null>(null);
+  // Kept true for the legacy gate below; the deterministic playback loop
+  // advances frames independently of individual tile request timing.
+  const frameBusyRef = useRef(true);
   const layerTouchedRef = useRef(false);
   const allerteLayerRef = useRef<L.GeoJSON | null>(null);
   const onDpcStormApproachingRef = useRef(onDpcStormApproaching);
@@ -416,6 +420,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
         time: Math.round(t / 1000),
         path: `${DPC_PROXY_URL}/dpc/frame?product=${product}&time=${t}`
       }));
+      setDpcTileSupported(false);
+      if (mapped.length > 0) {
+        const probe = mapped[mapped.length - 1];
+        fetch(`${DPC_PROXY_URL}/dpc/tile?product=${product}&time=${probe.time * 1000}&z=3&x=4&y=3`, { cache: 'no-store' })
+          .then((response) => setDpcTileSupported(response.ok))
+          .catch(() => setDpcTileSupported(false));
+      }
       setFrames(mapped);
       setCurrentFrameIndex((prev) =>
         jumpToLatest ? Math.max(0, mapped.length - 1) : Math.min(prev, Math.max(0, mapped.length - 1))
@@ -433,6 +444,17 @@ export const RadarView: React.FC<RadarViewProps> = ({
       setDpcLoading(false);
     }
   }, []);
+
+  // Deterministic playback loop for the interactive console. Tile loading is
+  // intentionally decoupled: slow or missing edge tiles must not stop time.
+  useEffect(() => {
+    if (!isPlaying || frames.length < 2) return;
+    const intervalMs = Math.round(2400 / playbackSpeed);
+    const timer = window.setInterval(() => {
+      setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [isPlaying, frames.length, playbackSpeed]);
 
   // Fetch RainViewer radar maps
   const loadRadarData = useCallback(async () => {
@@ -820,6 +842,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
       dpcTileLayerRef.current = null;
       dpcTileBoundsRef.current = null;
       dpcTileTemplateRef.current = null;
+      dpcImageOverlayRef.current = null;
       markerRef.current = null;
       overlayGroupRef.current = null;
     };
@@ -905,21 +928,41 @@ export const RadarView: React.FC<RadarViewProps> = ({
       mapInstanceRef.current.removeLayer(radarTileLayerRef.current);
       radarTileLayerRef.current = null;
     }
+    if (dpcImageOverlayRef.current) {
+      mapInstanceRef.current.removeLayer(dpcImageOverlayRef.current);
+      dpcImageOverlayRef.current = null;
+    }
     const dpcProduct = DPC_PLAYBACK_PRODUCT[radarLayerType];
 
     // DPC playback mode: serve the selected historical frame as Web-Mercator
     // tiles (/dpc/tile) so playback stays sharp at every zoom — like Zoom Earth.
     if (dpcProduct && dpcPlaybackActive && frames.length > 0 && dpcBounds) {
       const frame = frames[Math.min(currentFrameIndex, frames.length - 1)];
+      if (frame && !dpcTileSupported) {
+        if (dpcTileLayerRef.current) {
+          mapInstanceRef.current.removeLayer(dpcTileLayerRef.current);
+          dpcTileLayerRef.current = null;
+          dpcTileBoundsRef.current = null;
+          dpcTileTemplateRef.current = null;
+        }
+        const overlay = L.imageOverlay(frame.path, dpcBounds, {
+          opacity: radarOpacity,
+          pane: 'weatherPane',
+          interactive: false
+        }).addTo(mapInstanceRef.current);
+        dpcImageOverlayRef.current = overlay;
+        return;
+      }
       if (frame) {
         const template = `${DPC_PROXY_URL}/dpc/tile?product=${dpcProduct}&time=${Math.round(frame.time * 1000)}&z={z}&x={x}&y={y}`;
         const existing = dpcTileLayerRef.current;
         if (existing && dpcTileBoundsRef.current === dpcBounds) {
           if (dpcTileTemplateRef.current !== template) {
+            // Leaflet reloads the visible tile set when the template changes.
+            // Do not gate playback on tile events: one slow/404 tile can
+            // otherwise freeze the whole animation indefinitely.
             existing.setUrl(template);
             dpcTileTemplateRef.current = template;
-            frameBusyRef.current = true;
-            window.setTimeout(() => { frameBusyRef.current = false; }, 5000);
           }
           existing.setOpacity(radarOpacity);
         } else {
@@ -937,16 +980,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
             zIndex: 350,
             errorTileUrl: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"/>'
           }).addTo(mapInstanceRef.current);
-          layer.on('loading', () => { frameBusyRef.current = true; });
-          layer.on('load', () => { frameBusyRef.current = false; });
-          layer.on('tileerror', () => {
-            window.setTimeout(() => { frameBusyRef.current = false; }, 3000);
-          });
           dpcTileLayerRef.current = layer;
           dpcTileBoundsRef.current = dpcBounds;
           dpcTileTemplateRef.current = template;
-          frameBusyRef.current = true;
-          window.setTimeout(() => { frameBusyRef.current = false; }, 8000);
         }
       }
       return;
@@ -1084,7 +1120,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
       }).addTo(mapInstanceRef.current);
       radarTileLayerRef.current = wmsLayer;
     }
-  }, [radarLayerType, radarOpacity, getOverlayTileConfig, frames, currentFrameIndex, smoothRadar, colorScheme, dpcPlaybackActive, dpcBounds]);
+  }, [radarLayerType, radarOpacity, getOverlayTileConfig, frames, currentFrameIndex, smoothRadar, colorScheme, dpcPlaybackActive, dpcBounds, dpcTileSupported]);
 
   // Allerte zone overlay — DPC warning zones colored by criticality level.
   useEffect(() => {
