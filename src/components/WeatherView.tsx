@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   Search,
   ChevronRight,
+  ChevronDown,
   TrendingUp,
   Radio,
   Sunrise,
@@ -98,6 +99,8 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
   const [isSearching, setIsSearching] = useState(false);
   const [showCloudLevelsInfo, setShowCloudLevelsInfo] = useState(false);
   const [showTrajectoryInfo, setShowTrajectoryInfo] = useState(false);
+  const [selectedHourIdx, setSelectedHourIdx] = useState<number | null>(null);
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
   // Live Geocoding Search Debounce
   useEffect(() => {
@@ -212,6 +215,10 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
     const humidity = weatherData.hourly?.relativeHumidity?.[idx] ?? 60;
     const dewPoint = weatherData.hourly?.dewPoint?.[idx] ?? 10;
     const cond = getWeatherCondition(code, currentLang);
+    const uvIndex = weatherData.hourly?.uvIndex?.[idx] ?? 0;
+    const visibilityM = weatherData.hourly?.visibility?.[idx];
+    const visibilityKm = visibilityM != null ? Math.round((visibilityM / 1000) * 10) / 10 : null;
+    const cloudCover = weatherData.hourly?.cloudCover?.[idx] ?? 0;
 
     return {
       timeStr,
@@ -228,7 +235,10 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
       windGust: wGust,
       windDir: wDir,
       humidity,
-      dewPoint
+      dewPoint,
+      uvIndex,
+      visibilityKm,
+      cloudCover
     };
   });
 
@@ -590,6 +600,8 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         const minFelt = Math.min(...apparentTemps);
         const maxFelt = Math.max(...apparentTemps);
         const maxPrecip = Math.max(...hourlyItems.map((h) => h.precip));
+        const nowIdx = hourlyItems.findIndex((h) => h.isCurrent);
+        const activeHourIdx = selectedHourIdx ?? (nowIdx >= 0 ? nowIdx : 0);
 
         // Find largest felt temperature difference
         let maxDeltaItem = hourlyChartData[0];
@@ -730,7 +742,17 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
             {/* Interactive Multi-Series Line Graph */}
             <div className="w-full h-64 sm:h-72 pt-2">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={hourlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <ComposedChart
+                  data={hourlyChartData}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  onClick={(state: any) => {
+                    const label = (state as { activeLabel?: string } | null)?.activeLabel;
+                    if (label) {
+                      const i = hourlyChartData.findIndex((d) => d.time === label);
+                      if (i >= 0) setSelectedHourIdx(i);
+                    }
+                  }}
+                >
                   <defs>
                     <linearGradient id="actualTempGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.25} />
@@ -820,6 +842,127 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
               </ResponsiveContainer>
             </div>
 
+            {/* Hourly drill-down strip — click any hour (or the chart) to inspect it */}
+            <div className="pt-1">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                  <Grid className="w-3.5 h-3.5 text-sky-400" />
+                  Hourly breakdown
+                </span>
+                <span className="text-[11px] text-slate-500">Click a column to drill down</span>
+              </div>
+              <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+                {hourlyItems.map((h, i) => {
+                  const isActive = activeHourIdx === i;
+                  return (
+                    <button
+                      key={h.timeStr}
+                      onClick={() => setSelectedHourIdx(i)}
+                      className={`snap-start shrink-0 w-14 flex flex-col items-center gap-0.5 rounded-2xl border px-1.5 py-2 transition-all cursor-pointer ${
+                        isActive
+                          ? h.isCurrent
+                            ? 'bg-amber-500/20 border-amber-400/60'
+                            : 'bg-sky-500/15 border-sky-400/60'
+                          : 'bg-slate-950/60 border-slate-800 hover:border-slate-600'
+                      }`}
+                    >
+                      <span className={`text-[10px] font-bold ${h.isCurrent ? 'text-amber-300' : 'text-slate-400'}`}>
+                        {h.isCurrent ? 'Now' : h.timeFormatted}
+                      </span>
+                      <WeatherSymbol code={h.weatherCode} size="xs" />
+                      <span className="text-xs font-bold text-white">{Math.round(h.temp)}°</span>
+                      {h.precip > 0 ? (
+                        <span className="text-[9px] font-semibold text-sky-400">{h.precip}%</span>
+                      ) : (
+                        <span className="text-[9px] text-slate-600">{h.windSpeed} km/h</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Selected-hour detail panel */}
+              {activeHourIdx != null && (() => {
+                const h = hourlyItems[activeHourIdx];
+                const diff = h.apparentTemp - h.temp;
+                return (
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 mt-1 animate-fadeIn">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <div className="flex items-center gap-2.5">
+                        <WeatherSymbol code={h.weatherCode} size="sm" />
+                        <div>
+                          <div className="text-sm font-bold text-white flex items-center gap-2">
+                            {h.timeFormatted}
+                            {h.isCurrent && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-400 text-slate-950 font-black">NOW</span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400">{h.conditionText}</div>
+                        </div>
+                      </div>
+                      <span className="text-[11px] text-slate-500">
+                        {new Date(h.timeStr).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <Thermometer className="w-3 h-3 text-amber-400" /> Actual
+                        </div>
+                        <div className="text-lg font-black text-white mt-0.5">{Math.round(h.temp)}°C</div>
+                      </div>
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <Thermometer className="w-3 h-3 text-sky-400" /> Feels like
+                        </div>
+                        <div className="text-lg font-black text-sky-300 mt-0.5">{Math.round(h.apparentTemp)}°C</div>
+                        {Math.abs(diff) >= 0.3 && (
+                          <div className="text-[10px] text-slate-500 mt-0.5">
+                            {diff > 0 ? '+' : ''}{diff.toFixed(1)}°
+                          </div>
+                        )}
+                      </div>
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <CloudRain className="w-3 h-3 text-sky-400" /> Rain
+                        </div>
+                        <div className="text-lg font-black text-white mt-0.5">{h.precip}%</div>
+                        {h.rainAmount > 0 && (
+                          <div className="text-[10px] text-sky-400 font-semibold mt-0.5">{h.rainAmount.toFixed(1)} mm</div>
+                        )}
+                      </div>
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <Wind className="w-3 h-3 text-emerald-400" /> Wind
+                        </div>
+                        <div className="text-lg font-black text-white mt-0.5">{Math.round(h.windSpeed)} km/h</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
+                          <Compass className="w-2.5 h-2.5" /> {getWindDirection(h.windDir)} {h.windDir}° · gust {Math.round(h.windGust)}
+                        </div>
+                      </div>
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <Droplets className="w-3 h-3 text-sky-400" /> Humidity
+                        </div>
+                        <div className="text-lg font-black text-white mt-0.5">{Math.round(h.humidity)}%</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">Dew {Math.round(h.dewPoint)}°C</div>
+                      </div>
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-2.5">
+                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <Sun className="w-3 h-3 text-amber-400" /> UV · Clouds
+                        </div>
+                        <div className="text-lg font-black text-white mt-0.5">{h.uvIndex != null ? h.uvIndex.toFixed(0) : '–'}</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          {h.visibilityKm != null ? `${h.visibilityKm} km` : '–'} · {Math.round(h.cloudCover)}%
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
             {/* Visual Legend & Thermal Difference Ribbon */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800 text-xs">
               {/* Actual Range */}
@@ -865,14 +1008,37 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
 
       {/* 4. 7-DAY EXTENDED FORECAST (Clean Vertical Stack) */}
       {weatherData.daily && (() => {
-        const overallMin = Math.min(...(weatherData.daily.temperatureMin || [0]));
-        const overallMax = Math.max(...(weatherData.daily.temperatureMax || [30]));
+        const forecastMin = (weatherData.daily.temperatureMin || []).slice(1);
+        const forecastMax = (weatherData.daily.temperatureMax || []).slice(1);
+        const overallMin = forecastMin.length > 0 ? Math.min(...forecastMin) : Math.min(...(weatherData.daily.temperatureMin || [0]));
+        const overallMax = forecastMax.length > 0 ? Math.max(...forecastMax) : Math.max(...(weatherData.daily.temperatureMax || [30]));
         const tempRange = Math.max(1, overallMax - overallMin);
+
+        // Hourly breakdown for a given day, sourced from the full hourly series.
+        const hourlyForDay = (dateStr: string) => {
+          const times = weatherData.hourly?.time ?? [];
+          const day = new Date(dateStr).toDateString();
+          const out: { hour: string; temp: number; precip: number; code: number }[] = [];
+          for (let i = 0; i < times.length; i++) {
+            if (new Date(times[i]).toDateString() === day) {
+              out.push({
+                hour: formatTime(times[i]),
+                temp: Math.round(weatherData.hourly?.temperature?.[i] ?? 0),
+                precip: Math.round(weatherData.hourly?.precipitationProbability?.[i] ?? 0),
+                code: weatherData.hourly?.weatherCode?.[i] ?? 0
+              });
+            }
+          }
+          return out;
+        };
 
         return (
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 space-y-4 shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-lg font-bold text-white">7-Day Outlook</h3>
+              <h3 className="text-lg font-bold text-white">
+                {Math.max(0, (weatherData.daily.time.length ?? 1) - 1)}-Day Outlook
+                <span className="ml-2 text-[11px] font-normal text-slate-500">from tomorrow</span>
+              </h3>
               <div className="text-xs text-slate-400 font-medium">
                 Range: <span className="text-amber-300 font-bold">{Math.round(overallMin)}°</span> to <span className="text-amber-500 font-bold">{Math.round(overallMax)}°C</span>
               </div>
@@ -880,6 +1046,7 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
 
             <div className="divide-y divide-slate-800/80">
               {weatherData.daily.time.map((dateStr, idx) => {
+                if (idx === 0) return null; // today is already presented above
                 const code = weatherData.daily?.weatherCode[idx] ?? 0;
                 const cond = getWeatherCondition(code, currentLang);
                 const maxT = weatherData.daily?.temperatureMax[idx] ?? 0;
@@ -889,49 +1056,182 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
                 const daySunset = weatherData.daily?.sunset?.[idx] ? formatTime(weatherData.daily.sunset[idx]) : '';
                 const dayMoonPhaseVal = weatherData.daily?.moonPhase?.[idx] ?? 0;
                 const dayMoon = getMoonPhaseDetails(dayMoonPhaseVal);
+                const apparentMax = weatherData.daily?.apparentTemperatureMax?.[idx];
+                const apparentMin = weatherData.daily?.apparentTemperatureMin?.[idx];
+                const precipSum = weatherData.daily?.precipitationSum?.[idx];
+                const precipHours = weatherData.daily?.precipitationHours?.[idx];
+                const uvMax = weatherData.daily?.uvIndexMax?.[idx];
+                const windMax = weatherData.daily?.windSpeedMax?.[idx];
+                const windGustMax = weatherData.daily?.windGustsMax?.[idx];
+                const windDirDom = weatherData.daily?.windDirectionDominant?.[idx];
+                const dayMoonrise = weatherData.daily?.moonrise?.[idx] ? formatTime(weatherData.daily.moonrise[idx]) : '';
+                const dayMoonset = weatherData.daily?.moonset?.[idx] ? formatTime(weatherData.daily.moonset[idx]) : '';
+                const daylightSec = weatherData.daily?.daylightDuration?.[idx] ?? 0;
+                const dayHours = hourlyForDay(dateStr);
 
                 const leftPct = Math.max(0, Math.min(90, ((minT - overallMin) / tempRange) * 100));
                 const widthPct = Math.max(10, Math.min(100 - leftPct, ((maxT - minT) / tempRange) * 100));
 
                 return (
-                  <div key={dateStr} className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between text-sm gap-2.5">
-                    <div className="w-36 shrink-0 flex items-center gap-2.5">
-                      <WeatherSymbol code={code} size="sm" />
-                      <div>
-                        <div className="font-semibold text-white text-xs sm:text-sm">{formatDate(dateStr)}</div>
-                        <div className="text-[11px] text-slate-400 truncate">{cond.description}</div>
+                  <div key={dateStr}>
+                    <button
+                      onClick={() => setSelectedDayIdx(selectedDayIdx === idx ? null : idx)}
+                      aria-expanded={selectedDayIdx === idx}
+                      className={`w-full text-left py-3.5 px-2 flex flex-col sm:flex-row sm:items-center justify-between text-sm gap-2.5 rounded-2xl transition-all cursor-pointer group ${
+                        selectedDayIdx === idx ? 'bg-sky-500/5' : 'hover:bg-slate-800/40'
+                      }`}
+                    >
+                      <div className="w-36 shrink-0 flex items-center gap-2.5">
+                        <WeatherSymbol code={code} size="sm" />
+                        <div>
+                          <div className="font-semibold text-white text-xs sm:text-sm">{formatDate(dateStr)}</div>
+                          <div className="text-[11px] text-slate-400 truncate">{cond.description}</div>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-2.5 flex-1 max-w-xs justify-center">
-                      <span className="text-amber-300 text-xs font-semibold w-8 text-right">{Math.round(minT)}°</span>
-                      <div className="flex-1 h-2 rounded-full bg-slate-950 border border-slate-800/80 relative overflow-hidden">
-                        <div
-                          className="absolute top-0 bottom-0 rounded-full bg-gradient-to-r from-amber-300 via-amber-400 to-amber-500 shadow-sm"
-                          style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                      <div className="flex items-center gap-2.5 flex-1 max-w-xs justify-center">
+                        <span className="text-amber-300 text-xs font-semibold w-8 text-right">{Math.round(minT)}°</span>
+                        <div className="flex-1 h-2 rounded-full bg-slate-950 border border-slate-800/80 relative overflow-hidden">
+                          <div
+                            className="absolute top-0 bottom-0 rounded-full bg-gradient-to-r from-amber-300 via-amber-400 to-amber-500 shadow-sm"
+                            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                          />
+                        </div>
+                        <span className="font-bold text-amber-500 text-xs w-8 text-left">{Math.round(maxT)}°</span>
+                      </div>
+
+                      <div className="flex items-center justify-between sm:justify-end gap-3 text-xs">
+                        {daySunrise && daySunset && (
+                          <div className="flex items-center gap-1.5 text-slate-400 text-[11px]">
+                            <span className="flex items-center text-amber-400"><Sunrise className="w-3 h-3 mr-0.5" />{daySunrise}</span>
+                            <span>•</span>
+                            <span className="flex items-center text-amber-500"><Sunset className="w-3 h-3 mr-0.5" />{daySunset}</span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1 text-[11px] text-purple-300 bg-slate-950 px-2 py-0.5 rounded-lg border border-slate-800">
+                          <span>{dayMoon.icon}</span>
+                          <span className="hidden md:inline text-[10px] text-slate-400">{dayMoon.name}</span>
+                        </div>
+
+                        <div className="text-right w-16 shrink-0">
+                          <span className="text-xs font-semibold text-sky-400">{precip}%</span>
+                        </div>
+
+                        <ChevronDown
+                          className={`w-4 h-4 text-slate-500 shrink-0 transition-transform group-hover:text-slate-300 ${
+                            selectedDayIdx === idx ? 'rotate-180 text-sky-400' : ''
+                          }`}
                         />
                       </div>
-                      <span className="font-bold text-amber-500 text-xs w-8 text-left">{Math.round(maxT)}°</span>
-                    </div>
+                    </button>
 
-                    <div className="flex items-center justify-between sm:justify-end gap-3 text-xs">
-                      {daySunrise && daySunset && (
-                        <div className="flex items-center gap-1.5 text-slate-400 text-[11px]">
-                          <span className="flex items-center text-amber-400"><Sunrise className="w-3 h-3 mr-0.5" />{daySunrise}</span>
-                          <span>•</span>
-                          <span className="flex items-center text-amber-500"><Sunset className="w-3 h-3 mr-0.5" />{daySunset}</span>
+                    {selectedDayIdx === idx && (
+                      <div className="px-2 pb-4 grid grid-cols-2 sm:grid-cols-3 gap-2 animate-fadeIn">
+                        <div className="rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1.5">Day overview</div>
+                          <div className="text-sm font-bold text-white flex items-center gap-2">
+                            <WeatherSymbol code={code} size="xs" />
+                            <span>{cond.description}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1">
+                            <span className="text-amber-300 font-bold">{Math.round(minT)}°</span>
+                            <span className="mx-1">/</span>
+                            <span className="text-amber-500 font-bold">{Math.round(maxT)}°C</span>
+                          </div>
+                          {(apparentMin != null || apparentMax != null) && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              Feels like {apparentMin != null ? `${Math.round(apparentMin)}°` : '–'} – {apparentMax != null ? `${Math.round(apparentMax)}°` : '–'}
+                            </div>
+                          )}
                         </div>
-                      )}
 
-                      <div className="flex items-center gap-1 text-[11px] text-purple-300 bg-slate-950 px-2 py-0.5 rounded-lg border border-slate-800">
-                        <span>{dayMoon.icon}</span>
-                        <span className="hidden md:inline text-[10px] text-slate-400">{dayMoon.name}</span>
-                      </div>
+                        <div className="rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1.5">Rain</div>
+                          <div className="text-lg font-black text-sky-400">{precip}%</div>
+                          <div className="text-[11px] text-slate-400">
+                            {precipSum != null && precipSum > 0 ? `${precipSum.toFixed(1)} mm expected` : 'No significant accumulation'}
+                          </div>
+                          {precipHours != null && precipHours > 0 && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">≈ {Math.round(precipHours)} h of precipitation</div>
+                          )}
+                        </div>
 
-                      <div className="text-right w-16 shrink-0">
-                        <span className="text-xs font-semibold text-sky-400">{precip}%</span>
+                        <div className="rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1.5">Wind</div>
+                          {windMax != null ? (
+                            <>
+                              <div className="text-lg font-black text-white">{Math.round(windMax)} km/h</div>
+                              <div className="text-[11px] text-slate-400">
+                                {windGustMax != null ? `Gusts ${Math.round(windGustMax)} km/h` : ''}
+                              </div>
+                              {windDirDom != null && (
+                                <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
+                                  <Compass className="w-2.5 h-2.5" /> {getWindDirection(windDirDom)} {Math.round(windDirDom)}°
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="text-sm text-slate-400">No wind data</div>
+                          )}
+                        </div>
+
+                        {(daySunrise || daySunset || daylightSec > 0) && (
+                          <div className="rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1.5">Sun</div>
+                            {daySunrise && (
+                              <div className="text-[11px] text-slate-300 flex items-center gap-1.5">
+                                <Sunrise className="w-3.5 h-3.5 text-amber-400" /> {daySunrise}
+                              </div>
+                            )}
+                            {daySunset && (
+                              <div className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-1">
+                                <Sunset className="w-3.5 h-3.5 text-amber-500" /> {daySunset}
+                              </div>
+                            )}
+                            {daylightSec > 0 && (
+                              <div className="text-[10px] text-slate-500 mt-1">Daylight {formatDurationSeconds(daylightSec)}</div>
+                            )}
+                            {uvMax != null && (
+                              <div className="text-[10px] text-slate-500 mt-0.5">Max UV index {Math.round(uvMax)}</div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1.5">Moon</div>
+                          <div className="text-sm font-bold text-purple-300 flex items-center gap-1.5">
+                            <span>{dayMoon.icon}</span> {dayMoon.name}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-0.5">Illumination {dayMoon.illumination}%</div>
+                          {(dayMoonrise || dayMoonset) && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              {dayMoonrise ? `↑ ${dayMoonrise}` : ''} {dayMoonset ? `↓ ${dayMoonset}` : ''}
+                            </div>
+                          )}
+                        </div>
+
+                        {dayHours.length > 0 && (
+                          <div className="col-span-2 sm:col-span-3 rounded-2xl bg-slate-950/70 border border-slate-800 p-3">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-2">Hourly detail</div>
+                            <div className="flex gap-1.5 overflow-x-auto pb-1">
+                              {dayHours.map((hh) => (
+                                <div
+                                  key={hh.hour}
+                                  title={`${hh.hour} · ${getWeatherCondition(hh.code, currentLang).description} · ${hh.temp}°C · ${hh.precip}% rain`}
+                                  className="shrink-0 w-12 flex flex-col items-center gap-0.5 rounded-xl border border-slate-800 bg-slate-900 px-1 py-1.5"
+                                >
+                                  <span className="text-[9px] text-slate-400 font-semibold">{hh.hour}</span>
+                                  <WeatherSymbol code={hh.code} size="xs" />
+                                  <span className="text-[11px] font-bold text-white">{hh.temp}°</span>
+                                  <span className="text-[9px] font-semibold text-sky-400">{hh.precip}%</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}

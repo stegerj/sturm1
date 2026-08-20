@@ -265,6 +265,95 @@ async function renderPng(raw, product) {
   return colorizeBand(data, w, h, scaleForProduct(product));
 }
 
+/**
+ * Full-frame Web-Mercator reprojection. The client's image-overlay fallback
+ * (/dpc/frame) stretches this PNG over WGS84 bounds, so the image must be
+ * Mercator-aligned — the raw TM raster would visibly skew Italy. Per-tile
+ * rendering already reprojects; this is the whole-frame equivalent for
+ * proxies that don't serve the tile route yet.
+ */
+async function renderMercatorFrame(entry, product) {
+  const { w, h } = entry;
+  const [x0, y0] = entry.origin;
+  const rx = entry.res[0];
+  const ry = Math.abs(entry.res[1]);
+
+  // WGS84 bounds of the raster (TM corners -> WGS84; y0 is the top row).
+  const sw = toWgs.forward([x0, y0 - h * ry]);
+  const ne = toWgs.forward([x0 + w * rx, y0]);
+  const west = sw[0];
+  const east = ne[0];
+  const south = sw[1];
+  const north = ne[1];
+
+  const toMerc = (phiDeg) => {
+    const phi = (phiDeg * Math.PI) / 180;
+    return Math.log(Math.tan(Math.PI / 4 + phi / 2));
+  };
+  const fromMerc = (yM) => (2 * Math.atan(Math.exp(yM)) - Math.PI / 2) * (180 / Math.PI);
+
+  const OUT_W = 720;
+  const northY = toMerc(north);
+  const southY = toMerc(south);
+  const lonSpanRad = ((east - west) * Math.PI) / 180;
+  const OUT_H = Math.max(160, Math.round(((northY - southY) / lonSpanRad) * OUT_W));
+
+  const rasters = await entry.img.readRasters();
+  const band = rasters[0];
+  const out = new PNG({ width: OUT_W, height: OUT_H });
+  const sample = (px, py) => {
+    const lat = fromMerc(southY + ((northY - southY) * py) / OUT_H);
+    const lon = west + ((east - west) * px) / OUT_W;
+    const [crsX, crsY] = toDpc.forward([lon, lat]);
+    const sx = Math.round((crsX - x0) / rx);
+    const sy = Math.round((y0 - crsY) / ry);
+    if (sx < 0 || sy < 0 || sx >= w || sy >= h) return null;
+    const v = band[sy * w + sx];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+
+  if (product === "IR_108") {
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < band.length; i++) {
+      const v = band[i];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
+    const span = max - min || 1;
+    for (let py = 0; py < OUT_H; py++) {
+      for (let px = 0; px < OUT_W; px++) {
+        const v = sample(px, py);
+        if (v == null || v <= 0) continue;
+        const g = Math.round(255 * (1 - (v - min) / span));
+        const o = (py * OUT_W + px) * 4;
+        out.data[o] = g;
+        out.data[o + 1] = g;
+        out.data[o + 2] = g;
+        out.data[o + 3] = 255;
+      }
+    }
+  } else {
+    const scale = scaleForProduct(product);
+    for (let py = 0; py < OUT_H; py++) {
+      for (let px = 0; px < OUT_W; px++) {
+        const v = sample(px, py);
+        const c = v == null ? null : scale(v);
+        if (!c) continue;
+        const o = (py * OUT_W + px) * 4;
+        out.data[o] = c[0];
+        out.data[o + 1] = c[1];
+        out.data[o + 2] = c[2];
+        out.data[o + 3] = 255;
+      }
+    }
+  }
+
+  return PNG.sync.write(out);
+}
+
 // ---------------------------------------------------------------------------
 // Web-Mercator tile math (slippy map)
 // ---------------------------------------------------------------------------
@@ -536,10 +625,7 @@ async function handleFrame(url) {
   const entry = await getRaster(product, time);
   if (!entry) return { status: 404, json: { error: `Frame not found for ${product} @ ${time}` } };
 
-  const rasters = await entry.img.readRasters();
-  const bytes = product === "IR_108"
-    ? await irColorize(rasters[0], entry.w, entry.h)
-    : colorizeBand(rasters[0], entry.w, entry.h, scaleForProduct(product));
+  const bytes = await renderMercatorFrame(entry, product);
   cacheSet(pngCache, key, Date.now(), bytes);
   return { status: 200, png: bytes };
 }

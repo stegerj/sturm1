@@ -117,7 +117,7 @@ const DPC_TILED_LAYERS: Record<string, DpcTiledLayerConfig> = {
 };
 
 // Playback: DPC historical frames are only published as raw GeoTIFFs behind a
-// CORS-blocked S3 bucket, so scrubbing the last 2h is proxied through the
+// CORS-blocked S3 bucket, so scrubbing the last 5h is proxied through the
 // Render web-service proxy (server/index.mjs) fetches, decodes, colorizes and serves PNGs.
 // Each Italy tab maps to the DPC REST product that carries the same data.
 // Note: 'dpc-dbz' (composite reflectivity) has no REST product → stays static WMS.
@@ -175,9 +175,16 @@ const getLayerLegend = (layer: RadarLayerType) => {
   };
 };
 
-// Proxy base URL — your Render web service (set via VITE_DPC_PROXY_URL).
-// Without it, Italy tabs stay on the static latest-frame WMS feed.
-const DPC_PROXY_URL = ((import.meta.env.VITE_DPC_PROXY_URL as string | undefined) || '').replace(/\/+$/, '');
+// DPC radar playback proxy — resolved at runtime in this order:
+//   1. VITE_DPC_PROXY_URL (explicit override)
+//   2. window.location.origin (same-origin deployment)
+//   3. The known deployed Render proxy
+// The component probes each candidate and keeps the first that answers /dpc/frames.
+const DPC_PROXY_CANDIDATES = [
+  ((import.meta.env.VITE_DPC_PROXY_URL as string | undefined) || '').replace(/\/+$/, ''),
+  typeof window !== 'undefined' ? window.location.origin : '',
+  'https://sturm1.onrender.com'
+].filter(Boolean);
 const DPC_PLAYBACK_HOURS = 5;
 
 export const RadarView: React.FC<RadarViewProps> = ({
@@ -221,6 +228,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const [dpcError, setDpcError] = useState<string | null>(null);
   const [dpcPoint, setDpcPoint] = useState<{ value: number | null; unit: string; reason: string } | null>(null);
   const [dpcTileSupported, setDpcTileSupported] = useState(false);
+  const [dpcProxyUrl, setDpcProxyUrl] = useState<string>(() => DPC_PROXY_CANDIDATES[0] || '');
+  const [pendingFrameIdx, setPendingFrameIdx] = useState<number | null>(null);
   const [showAllerte, setShowAllerte] = useState(true);
   const [allerteZones, setAllerteZones] = useState<FeatureCollection | null>(null);
   const [allerteBulletin, setAllerteBulletin] = useState<DpcBulletin | null>(null);
@@ -242,9 +251,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
   const dpcTileBoundsRef = useRef<L.LatLngBoundsExpression | null>(null);
   const dpcTileTemplateRef = useRef<string | null>(null);
   const dpcImageOverlayRef = useRef<L.ImageOverlay | null>(null);
-  // Kept true for the legacy gate below; the deterministic playback loop
-  // advances frames independently of individual tile request timing.
-  const frameBusyRef = useRef(true);
   const layerTouchedRef = useRef(false);
   const allerteLayerRef = useRef<L.GeoJSON | null>(null);
   const onDpcStormApproachingRef = useRef(onDpcStormApproaching);
@@ -256,6 +262,28 @@ export const RadarView: React.FC<RadarViewProps> = ({
       setCurrentTime(new Date());
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Resolve the best DPC proxy at runtime: explicit env var → same origin → known Render proxy.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (const base of DPC_PROXY_CANDIDATES) {
+        if (!base || cancelled) continue;
+        try {
+          const res = await fetch(`${base}/dpc/frames?product=VMI&hours=1`, { cache: 'no-store' });
+          if (res.ok) {
+            if (!cancelled) setDpcProxyUrl(base);
+            return;
+          }
+        } catch {
+          // try the next candidate
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const lat = weatherData?.latitude ?? 52.52;
@@ -401,6 +429,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   // Update frame list based on active layer
   const updateFramesForLayer = useCallback((layer: RadarLayerType, maps: RadarMapsResponse | null) => {
     if (!maps) return;
+    setPendingFrameIdx(null);
 
     if (layer === 'radar') {
       const allFrames: RadarFrame[] = [];
@@ -417,10 +446,10 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, []);
 
-  // Fetch the last 2h of DPC frames for an Italy tab through the Render proxy.
+  // Fetch the last 5h of DPC frames for an Italy tab through the Render proxy.
   const loadDpcFrames = useCallback(async (layer: RadarLayerType, jumpToLatest = true) => {
     const product = DPC_PLAYBACK_PRODUCT[layer];
-    if (!product || !DPC_PROXY_URL) {
+    if (!product || !dpcProxyUrl) {
       setDpcPlaybackActive(false);
       setDpcBounds(null);
       return;
@@ -428,8 +457,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
     setDpcLoading(true);
     setDpcError(null);
     setFrames([]); // clear any previous product's frames while loading
+    setPendingFrameIdx(null);
     try {
-      const res = await fetch(`${DPC_PROXY_URL}/dpc/frames?product=${product}&hours=${DPC_PLAYBACK_HOURS}`);
+      const res = await fetch(`${dpcProxyUrl}/dpc/frames?product=${product}&hours=${DPC_PLAYBACK_HOURS}`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error ?? `Playback backend error (HTTP ${res.status})`);
@@ -438,12 +468,12 @@ export const RadarView: React.FC<RadarViewProps> = ({
       const list = (Array.isArray(data.frames) ? data.frames : []) as number[];
       const mapped = list.map((t) => ({
         time: Math.round(t / 1000),
-        path: `${DPC_PROXY_URL}/dpc/frame?product=${product}&time=${t}`
+        path: `${dpcProxyUrl}/dpc/frame?product=${product}&time=${t}`
       }));
       setDpcTileSupported(false);
       if (mapped.length > 0) {
         const probe = mapped[mapped.length - 1];
-        fetch(`${DPC_PROXY_URL}/dpc/tile?product=${product}&time=${probe.time * 1000}&z=3&x=4&y=3`, { cache: 'no-store' })
+        fetch(`${dpcProxyUrl}/dpc/tile?product=${product}&time=${probe.time * 1000}&z=3&x=4&y=3`, { cache: 'no-store' })
           .then((response) => setDpcTileSupported(response.ok))
           .catch(() => setDpcTileSupported(false));
       }
@@ -463,18 +493,48 @@ export const RadarView: React.FC<RadarViewProps> = ({
     } finally {
       setDpcLoading(false);
     }
-  }, []);
+  }, [dpcProxyUrl]);
 
-  // Deterministic playback loop for the interactive console. Tile loading is
-  // intentionally decoupled: slow or missing edge tiles must not stop time.
+  // Playback loop — schedules the next frame but only advances once that
+  // frame's picture is actually ready (preload effect below), so the current
+  // image stays on screen until the next one can replace it. A safety timeout
+  // keeps playback from stalling on slow or missing sources.
   useEffect(() => {
     if (!isPlaying || frames.length < 2) return;
     const intervalMs = Math.round(2400 / playbackSpeed);
     const timer = window.setInterval(() => {
-      setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
+      setPendingFrameIdx((prev) => (prev == null ? (currentFrameIndex + 1) % frames.length : prev));
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [isPlaying, frames.length, playbackSpeed]);
+  }, [isPlaying, frames.length, playbackSpeed, currentFrameIndex]);
+
+  // Preload the pending frame; swap only when its picture is ready.
+  useEffect(() => {
+    if (pendingFrameIdx == null || !isPlaying) return;
+    const next = frames[pendingFrameIdx];
+    if (!next) return;
+
+    let settled = false;
+    const apply = () => {
+      if (settled) return;
+      settled = true;
+      setCurrentFrameIndex(pendingFrameIdx);
+      setPendingFrameIdx(null);
+    };
+
+    const img = new Image();
+    img.onload = apply;
+    img.onerror = apply;
+    img.src = next.path;
+
+    const safety = window.setTimeout(apply, 2000);
+    return () => {
+      window.clearTimeout(safety);
+      settled = true;
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [pendingFrameIdx, isPlaying, frames, currentFrameIndex]);
 
   // Fetch RainViewer radar maps
   const loadRadarData = useCallback(async () => {
@@ -510,7 +570,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     const timer = setInterval(() => {
       loadRadarData();
       const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
-      if (product && DPC_PROXY_URL) loadDpcFrames(radarLayerType, false);
+      if (product && dpcProxyUrl) loadDpcFrames(radarLayerType, false);
     }, 10 * 60 * 1000);
     return () => clearInterval(timer);
   }, [loadRadarData, radarLayerType, loadDpcFrames]);
@@ -536,7 +596,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     if (product) {
       setDpcPlaybackActive(false);
       setDpcBounds(null);
-      if (DPC_PROXY_URL) {
+      if (dpcProxyUrl) {
         loadDpcFrames(radarLayerType);
       } else {
         setDpcError(null);
@@ -546,13 +606,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
       setDpcBounds(null);
       setDpcError(null);
     }
-  }, [radarLayerType, loadDpcFrames]);
+  }, [radarLayerType, loadDpcFrames, dpcProxyUrl]);
 
   // Live rain rate at the user's location for the current DPC frame.
   useEffect(() => {
     const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
     const frame = frames[currentFrameIndex];
-    if (!product || !DPC_PROXY_URL || !dpcPlaybackActive || !frame) {
+    if (!product || !dpcProxyUrl || !dpcPlaybackActive || !frame) {
       setDpcPoint(null);
       return;
     }
@@ -562,7 +622,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
     let cancelled = false;
     fetch(
-      `${DPC_PROXY_URL}/dpc/point?product=${product}&time=${Math.round(frame.time * 1000)}&lat=${weatherData.latitude}&lon=${weatherData.longitude}`
+      `${dpcProxyUrl}/dpc/point?product=${product}&time=${Math.round(frame.time * 1000)}&lat=${weatherData.latitude}&lon=${weatherData.longitude}`
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -576,13 +636,35 @@ export const RadarView: React.FC<RadarViewProps> = ({
     };
   }, [radarLayerType, currentFrameIndex, dpcPlaybackActive, frames, weatherData?.latitude, weatherData?.longitude]);
 
+  // Keep the shared image-first insight card in sync with the actual selected frame.
+  useEffect(() => {
+    const imageKind = radarLayerType === 'radar' || (DPC_TILED_LAYERS[radarLayerType] && radarLayerType !== 'dpc-ir') ? 'radar' : 'satellite';
+    const imageTimestamp = getImageTimestampInfo();
+    window.dispatchEvent(new CustomEvent('storm-alert:radar-insights', {
+      detail: {
+        layerLabel: getLayerLegend(radarLayerType).title,
+        imageKind,
+        timestamp: imageTimestamp.date.getTime(),
+        ageText: imageTimestamp.ageText,
+        locationName,
+        dpcPoint,
+        dpcApproach,
+        dpcCells,
+        dpcPlaybackActive,
+        dpcProxyConfigured: Boolean(dpcProxyUrl),
+        satelliteData: weatherData?.mtgData,
+        currentPrecipitation: weatherData?.current?.precipitation ?? 0
+      }
+    }));
+  }, [radarLayerType, currentFrameIndex, dpcPoint, dpcApproach, dpcCells, dpcPlaybackActive, currentTime, locationName, weatherData?.mtgData, weatherData?.current?.precipitation]);
+
   // Allerte — official DPC "Bollettino di Criticità" (warning zones + levels).
   // Bulletin is published once a day; refresh on a 30-min cadence.
   const loadAllerte = useCallback(async (forceRefresh = false) => {
     setAllerteLoading(true);
     setAllerteError(null);
     try {
-      const resolution = await resolveLatestBulletin(DPC_PROXY_URL, forceRefresh);
+      const resolution = await resolveLatestBulletin(dpcProxyUrl, forceRefresh);
       setAllerteResolution(resolution);
       const bulletin = await fetchBulletin(resolution.id);
       setAllerteBulletin(bulletin);
@@ -595,7 +677,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     } finally {
       setAllerteLoading(false);
     }
-  }, []);
+  }, [dpcProxyUrl]);
 
   useEffect(() => {
     loadAllerte();
@@ -607,7 +689,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
   // project their track toward the user and raise the siren modal on a collision.
   useEffect(() => {
     const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
-    if (!product || !DPC_PROXY_URL || !dpcPlaybackActive || frames.length < 2) {
+    if (!product || !dpcProxyUrl || !dpcPlaybackActive || frames.length < 2) {
       setDpcCells([]);
       setDpcApproach(null);
       return;
@@ -620,7 +702,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
     const analyze = async () => {
       const t2 = frames[frames.length - 1].time * 1000;
       const t1 = frames[Math.max(0, frames.length - 2)].time * 1000;
-      const base = `${DPC_PROXY_URL}/dpc/cells?product=${product}&lat=${uLat}&lon=${uLon}&radiusKm=150&minMmH=1`;
+      const base = `${dpcProxyUrl}/dpc/cells?product=${product}&lat=${uLat}&lon=${uLon}&radiusKm=150&minMmH=1`;
       try {
         const [r2, r1] = await Promise.all([
           fetch(`${base}&time=${t2}`).then((r) => (r.ok ? r.json() : null)),
@@ -974,7 +1056,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
         return;
       }
       if (frame) {
-        const template = `${DPC_PROXY_URL}/dpc/tile?product=${dpcProduct}&time=${Math.round(frame.time * 1000)}&z={z}&x={x}&y={y}`;
+        const template = `${dpcProxyUrl}/dpc/tile?product=${dpcProduct}&time=${Math.round(frame.time * 1000)}&z={z}&x={x}&y={y}`;
         const existing = dpcTileLayerRef.current;
         if (existing && dpcTileBoundsRef.current === dpcBounds) {
           if (dpcTileTemplateRef.current !== template) {
@@ -1408,21 +1490,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
     }
   }, [lat, lon, showRangeRings, showVectorArrow, prediction, weatherData, radarLayerType, dpcPlaybackActive, dpcCells, dpcApproach]);
 
-  // Animation Loop for Radar/Satellite Frames — advances only after the
-  // current frame's tiles have actually painted (frameBusyRef), so playback
-  // never races ahead of the proxy and aborts pending image loads.
-  useEffect(() => {
-    if (!isPlaying || frames.length === 0) return;
-
-    const intervalMs = Math.round(600 / playbackSpeed);
-    const timer = setInterval(() => {
-      if (frameBusyRef.current) return;
-      setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
-    }, intervalMs);
-
-    return () => clearInterval(timer);
-  }, [isPlaying, frames.length, playbackSpeed]);
-
   // Prefetch the next frame while playing (warms the proxy raster cache so
   // the frame change paints almost instantly).
   useEffect(() => {
@@ -1474,11 +1541,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
   const handleStepBack = () => {
     setIsPlaying(false);
+    setPendingFrameIdx(null);
     setCurrentFrameIndex((prev) => (prev === 0 ? frames.length - 1 : prev - 1));
   };
 
   const handleStepForward = () => {
     setIsPlaying(false);
+    setPendingFrameIdx(null);
     setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
   };
 
@@ -1732,7 +1801,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
             onClick={() => {
               loadRadarData();
               const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
-              if (product && DPC_PROXY_URL) loadDpcFrames(radarLayerType, false);
+              if (product && dpcProxyUrl) loadDpcFrames(radarLayerType, false);
             }}
             disabled={loadingRadar}
             className="p-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer disabled:opacity-50 shrink-0"
@@ -2019,49 +2088,208 @@ export const RadarView: React.FC<RadarViewProps> = ({
         <div ref={mapContainerRef} className="w-full h-full z-0" />
       </div>
 
-      {/* DPC playback status — shown only on Italy tabs */}
-      {DPC_PLAYBACK_PRODUCT[radarLayerType] && (
-        <div className={`bg-slate-900 border rounded-3xl p-4 sm:p-5 shadow-xl flex flex-wrap items-center justify-between gap-3 ${dpcPlaybackActive ? 'border-teal-700/50' : 'border-amber-500/25'}`}>
-          <div className="flex items-center gap-3">
-            <div className={`p-2.5 rounded-2xl ${dpcPlaybackActive ? 'bg-teal-500/10 border border-teal-500/20 text-teal-400' : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'}`}>
-              {dpcPlaybackActive ? <Play className="w-5 h-5" /> : <Info className="w-5 h-5" />}
-            </div>
-            <div>
-              <div className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
-                {dpcPlaybackActive ? 'Italy playback ready — last 2 hours' : 'Italy playback not active'}
-              </div>
-              <div className="text-xs text-slate-400 mt-0.5">
-                {!DPC_PROXY_URL
-                  ? '2h playback needs the Render proxy. Set VITE_DPC_PROXY_URL to your Render service URL (e.g. https://storm-radar-dpc-proxy.onrender.com) to scrub through the last 2h of DPC frames.'
-                  : dpcLoading
-                  ? 'Fetching DPC frame history…'
-                  : dpcError
-                  ? dpcError
-                  : 'Showing the latest DPC frame from the tiled WMS feed.'}
-              </div>
-              {dpcPlaybackActive && (
-                <div className={`mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold ${dpcPointColor}`}>
-                  <MapPin className="w-3.5 h-3.5" />
-                  {dpcPoint?.value != null
-                    ? `${dpcPoint.value} ${dpcPoint.unit} of rain over ${locationName}`
-                    : `No precipitation over ${locationName} right now`}
+      {/* Dedicated Playback & Stream Console (Below Map) — one console for global radar and Italy DPC products */}
+      {(radarLayerType === 'radar' || dpcPlaybackActive) && frames.length > 0 && (
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            {/* Playback Controls & Frame Info with Timestamp */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleStepBack}
+                className="p-2.5 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-all cursor-pointer"
+                title="Step Back"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => {
+                  const nextPlay = !isPlaying;
+                  setIsPlaying(nextPlay);
+                  if (!nextPlay) setPendingFrameIdx(null);
+                }}
+                className="w-11 h-11 rounded-2xl bg-sky-500 hover:bg-sky-400 text-white flex items-center justify-center shadow-lg shadow-sky-500/25 transition-all cursor-pointer shrink-0"
+                title={isPlaying ? 'Pause Loop' : 'Play Loop'}
+              >
+                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+              </button>
+
+              <button
+                onClick={handleStepForward}
+                className="p-2.5 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-all cursor-pointer"
+                title="Step Forward"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-bold text-white font-mono flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-sky-400 inline" />
+                    {currentFrame ? formatTime(currentFrame.time) : '--:--'} UTC
+                  </span>
+                  {currentFrame && (
+                    <span className="text-xs text-slate-400 font-mono hidden sm:inline">
+                      ({new Date(currentFrame.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} Local)
+                    </span>
+                  )}
+                  {isFutureFrame && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse">
+                      Nowcast Forecast
+                    </span>
+                  )}
+                  {isPastFrame && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                      Live Past Frame
+                    </span>
+                  )}
                 </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  {radarLayerType === 'radar'
+                    ? `Radar Frame ${currentFrameIndex + 1} of ${frames.length} • 10-min interval scan`
+                    : `DPC/ARPA ${DPC_PLAYBACK_PRODUCT[radarLayerType] ?? ''} frame ${currentFrameIndex + 1} of ${frames.length} • ${DPC_PLAYBACK_STEP[radarLayerType] ?? 5}-min scan • last ${DPC_PLAYBACK_HOURS}h`}
+                  {radarLayerType !== 'radar' && currentFrameIndex === frames.length - 1 && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 ml-1">
+                      Latest
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Playback Speed & Radar Mode Toggles */}
+            <div className="flex items-center gap-2 flex-wrap justify-start md:justify-end">
+              <div className="flex items-center bg-slate-950 rounded-2xl p-1 border border-slate-800 text-xs text-slate-400">
+                <span className="px-2 text-[10px] uppercase font-bold text-slate-500">Speed</span>
+                {[0.5, 1, 2].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setPlaybackSpeed(s)}
+                    className={`px-2.5 py-1 rounded-xl font-bold transition-all cursor-pointer ${
+                      playbackSpeed === s ? 'bg-sky-500 text-white' : 'hover:text-slate-200'
+                    }`}
+                  >
+                    {s}x
+                  </button>
+                ))}
+              </div>
+
+              {radarLayerType !== 'radar' && (
+                <button
+                  onClick={() => loadDpcFrames(radarLayerType, false)}
+                  className="px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer bg-slate-950 border-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5"
+                  title="Reload the DPC frame history"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-teal-400" />
+                  Reload
+                </button>
               )}
+
+              <button
+                onClick={() => setShowRangeRings(!showRangeRings)}
+                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
+                  showRangeRings
+                    ? 'bg-purple-500/15 border-purple-500/30 text-purple-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Range Rings
+              </button>
+
+              <button
+                onClick={() => setShowVectorArrow(!showVectorArrow)}
+                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
+                  showVectorArrow
+                    ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Storm Vectors
+              </button>
+
+              <button
+                onClick={() => setSmoothRadar(!smoothRadar)}
+                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
+                  smoothRadar
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {smoothRadar ? 'Smoothing: ON' : 'Raw Data'}
+              </button>
+            </div>
+          </div>
+
+          {/* Live DPC point sample + approaching-cell alarm (Italy products) */}
+          {radarLayerType !== 'radar' && (dpcPoint?.value != null || dpcApproach) && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold ${dpcPointColor}`}>
+                <MapPin className="w-3.5 h-3.5" />
+                {dpcPoint?.value != null
+                  ? `${dpcPoint.value} ${dpcPoint.unit} of rain over ${locationName}`
+                  : `No precipitation over ${locationName} right now`}
+              </div>
               {dpcApproach && (
-                <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold bg-rose-500/15 border-rose-500/40 text-rose-300 animate-pulse">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-semibold bg-rose-500/15 border-rose-500/40 text-rose-300 animate-pulse">
                   <ShieldAlert className="w-3.5 h-3.5" />
                   Rain cell {dpcApproach.distanceKm} km away • ETA ~{dpcApproach.etaMinutes} min • {dpcApproach.intensity} mm/h
                 </div>
               )}
             </div>
+          )}
+
+          {/* Scrubber Progress Slider */}
+          <div className="space-y-1">
+            <div className="flex justify-between text-[11px] text-slate-400 font-mono">
+              <span>{frames.length > 0 ? formatTime(frames[0].time) : '--:--'} UTC (Start)</span>
+              <span className="text-sky-400 font-bold">Scrubber (Click / Drag to inspect)</span>
+              <span>{frames.length > 0 ? formatTime(frames[frames.length - 1].time) : '--:--'} UTC (Latest)</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={frames.length - 1}
+              value={currentFrameIndex}
+              onChange={(e) => {
+                setIsPlaying(false);
+                setPendingFrameIdx(null);
+                setCurrentFrameIndex(parseInt(e.target.value));
+              }}
+              className="w-full h-2.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500"
+            />
           </div>
-          {DPC_PROXY_URL && !dpcLoading && (
+        </div>
+      )}
+
+      {/* Italy DPC product status — shown when 5h frame history is not available */}
+      {DPC_PLAYBACK_PRODUCT[radarLayerType] && frames.length === 0 && (
+        <div className="bg-slate-900 border border-amber-500/25 rounded-3xl p-4 sm:p-5 shadow-xl flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
+              <Info className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">
+                Italy radar history — last {DPC_PLAYBACK_HOURS}h
+              </div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {dpcLoading
+                  ? 'Fetching DPC frame history…'
+                  : dpcError
+                  ? dpcError
+                  : !dpcProxyUrl
+                  ? 'DPC playback proxy not reachable — showing the latest live frame only.'
+                  : 'No DPC frames available right now — showing the latest live frame.'}
+              </div>
+            </div>
+          </div>
+          {dpcProxyUrl && !dpcLoading && (
             <button
               onClick={() => loadDpcFrames(radarLayerType, false)}
               className="px-3.5 py-2 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
             >
               <RefreshCw className="w-3.5 h-3.5 text-teal-400" />
-              Refresh frames
+              Retry
             </button>
           )}
         </div>
@@ -2171,145 +2399,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* Dedicated Bottom Playback & Stream Console (Outside Map) */}
-      {(radarLayerType === 'radar' || dpcPlaybackActive) && frames.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-            {/* Playback Controls & Frame Info with Timestamp */}
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleStepBack}
-                className="p-2.5 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-all cursor-pointer"
-                title="Step Back 10m"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setIsPlaying(!isPlaying)}
-                className="w-11 h-11 rounded-2xl bg-sky-500 hover:bg-sky-400 text-white flex items-center justify-center shadow-lg shadow-sky-500/25 transition-all cursor-pointer shrink-0"
-                title={isPlaying ? 'Pause Loop' : 'Play Loop'}
-              >
-                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-              </button>
-
-              <button
-                onClick={handleStepForward}
-                className="p-2.5 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-all cursor-pointer"
-                title="Step Forward 10m"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-bold text-white font-mono flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-sky-400 inline" />
-                    {currentFrame ? formatTime(currentFrame.time) : '--:--'} UTC
-                  </span>
-                  {currentFrame && (
-                    <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-                      ({new Date(currentFrame.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} Local)
-                    </span>
-                  )}
-                  {isFutureFrame && (
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse">
-                      Nowcast Forecast
-                    </span>
-                  )}
-                  {isPastFrame && (
-                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                      Live Past Frame
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5">
-                  {radarLayerType === 'radar'
-                    ? `Radar Frame ${currentFrameIndex + 1} of ${frames.length} • 10-min interval scan`
-                    : `DPC/ARPA frame ${currentFrameIndex + 1} of ${frames.length} • ${DPC_PLAYBACK_STEP[radarLayerType] ?? 5}-min scan`}
-                  {radarLayerType !== 'radar' && currentFrameIndex === frames.length - 1 && (
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 ml-1">
-                      Latest
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Playback Speed & Radar Mode Toggles */}
-            <div className="flex items-center gap-2 flex-wrap justify-start md:justify-end">
-              <div className="flex items-center bg-slate-950 rounded-2xl p-1 border border-slate-800 text-xs text-slate-400">
-                <span className="px-2 text-[10px] uppercase font-bold text-slate-500">Speed</span>
-                {[0.5, 1, 2].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setPlaybackSpeed(s)}
-                    className={`px-2.5 py-1 rounded-xl font-bold transition-all cursor-pointer ${
-                      playbackSpeed === s ? 'bg-sky-500 text-white' : 'hover:text-slate-200'
-                    }`}
-                  >
-                    {s}x
-                  </button>
-                ))}
-              </div>
-
-              <button
-                onClick={() => setShowRangeRings(!showRangeRings)}
-                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
-                  showRangeRings
-                    ? 'bg-purple-500/15 border-purple-500/30 text-purple-300'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Range Rings
-              </button>
-
-              <button
-                onClick={() => setShowVectorArrow(!showVectorArrow)}
-                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
-                  showVectorArrow
-                    ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Storm Vectors
-              </button>
-
-              <button
-                onClick={() => setSmoothRadar(!smoothRadar)}
-                className={`px-3 py-1.5 rounded-2xl border text-xs font-semibold transition-all cursor-pointer ${
-                  smoothRadar
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {smoothRadar ? 'Smoothing: ON' : 'Raw Data'}
-              </button>
-            </div>
-          </div>
-
-          {/* Scrubber Progress Slider */}
-          <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-              <span>{frames.length > 0 ? formatTime(frames[0].time) : '--:--'} UTC (Start)</span>
-              <span className="text-sky-400 font-bold">Scrubber (Click / Drag to inspect)</span>
-              <span>{frames.length > 0 ? formatTime(frames[frames.length - 1].time) : '--:--'} UTC (Latest)</span>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={frames.length - 1}
-              value={currentFrameIndex}
-              onChange={(e) => {
-                setIsPlaying(false);
-                setCurrentFrameIndex(parseInt(e.target.value));
-              }}
-              className="w-full h-2.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500"
-            />
-          </div>
         </div>
       )}
 
