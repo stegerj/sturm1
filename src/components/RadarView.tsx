@@ -264,18 +264,32 @@ export const RadarView: React.FC<RadarViewProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  // Fetch with a hard timeout so a hanging candidate can't block the proxy probe.
+  const fetchWithTimeout = (url: string, timeoutMs: number) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { cache: 'no-store', signal: controller.signal }).finally(() =>
+      window.clearTimeout(timer)
+    );
+  };
+
   // Resolve the best DPC proxy at runtime: explicit env var → same origin → known Render proxy.
+  // Each candidate must return REAL JSON frames — a SPA host that answers every path with
+  // index.html (HTTP 200) is rejected here, otherwise loading frames throws a JSON parse error.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       for (const base of DPC_PROXY_CANDIDATES) {
         if (!base || cancelled) continue;
         try {
-          const res = await fetch(`${base}/dpc/frames?product=VMI&hours=1`, { cache: 'no-store' });
-          if (res.ok) {
-            if (!cancelled) setDpcProxyUrl(base);
-            return;
-          }
+          const res = await fetchWithTimeout(`${base}/dpc/frames?product=VMI&hours=1`, 8000);
+          if (!res.ok) continue;
+          const contentType = res.headers.get('content-type') ?? '';
+          if (!contentType.includes('application/json')) continue;
+          const data = await res.json().catch(() => null);
+          if (!data || !Array.isArray(data.frames)) continue;
+          if (!cancelled) setDpcProxyUrl(base);
+          return;
         } catch {
           // try the next candidate
         }
@@ -319,6 +333,12 @@ export const RadarView: React.FC<RadarViewProps> = ({
       window.removeEventListener('storm-alert:select-radar-nowcast', onNowcastSelected);
     };
   }, [selectLayer]);
+
+  // Keep the shared DPC product selector in sync with the active layer on mount.
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('storm-alert:radar-layer-changed', { detail: radarLayerType }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Default Italian users to the national DPC radar once their location resolves.
   useEffect(() => {
@@ -459,9 +479,13 @@ export const RadarView: React.FC<RadarViewProps> = ({
     setFrames([]); // clear any previous product's frames while loading
     setPendingFrameIdx(null);
     try {
-      const res = await fetch(`${dpcProxyUrl}/dpc/frames?product=${product}&hours=${DPC_PLAYBACK_HOURS}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
+      const res = await fetchWithTimeout(
+        `${dpcProxyUrl}/dpc/frames?product=${product}&hours=${DPC_PLAYBACK_HOURS}`,
+        45000
+      );
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        const body = contentType.includes('application/json') ? await res.json().catch(() => null) : null;
         throw new Error(body?.error ?? `Playback backend error (HTTP ${res.status})`);
       }
       const data = await res.json();
@@ -1715,85 +1739,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
             >
               <span>DWD Sat</span>
             </button>
-            </div>
-          </div>
-
-          {/* Italy — DPC / ARPA national radar (regional composite, ~1km native, zoom 18) */}
-          <div className="flex items-center gap-2 w-full sm:w-auto min-w-0">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-teal-400 shrink-0">Italy · DPC/ARPA</span>
-            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-teal-800/60 overflow-x-auto max-w-full">
-              {/* VMI rain intensity */}
-              <button
-                onClick={() => selectLayer('dpc-vmi')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                  radarLayerType === 'dpc-vmi'
-                    ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title="VMI — rain intensity (mm/h), 5-min, ~1km native"
-              >
-                <CloudRain className="w-3.5 h-3.5" />
-                <span>VMI</span>
-              </button>
-
-              {/* SRI surface rain intensity */}
-              <button
-                onClick={() => selectLayer('dpc-sri')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                  radarLayerType === 'dpc-sri'
-                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title="SRI — surface rain intensity (mm/h), 5-min"
-              >
-                <CloudRain className="w-3.5 h-3.5" />
-                <span>SRI</span>
-              </button>
-
-              {/* National composite reflectivity */}
-              <button
-                onClick={() => selectLayer('dpc-dbz')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                  radarLayerType === 'dpc-dbz'
-                    ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title="National composite reflectivity (dBZ), 5-min"
-              >
-                <Radio className="w-3.5 h-3.5" />
-                <span>dBZ</span>
-              </button>
-
-              {/* Rainfall accumulations (1/3/6/12/24 h) */}
-              {(['dpc-srt1', 'dpc-srt3', 'dpc-srt6', 'dpc-srt12', 'dpc-srt24'] as RadarLayerType[]).map((layerId) => (
-                <button
-                  key={layerId}
-                  onClick={() => selectLayer(layerId)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                    radarLayerType === layerId
-                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                  title={`${DPC_TILED_LAYERS[layerId].badge} — rainfall accumulation`}
-                >
-                  <CloudRain className="w-3.5 h-3.5" />
-                  <span>{DPC_TILED_LAYERS[layerId].tabLabel}</span>
-                </button>
-              ))}
-
-              {/* IR satellite */}
-              <button
-                onClick={() => selectLayer('dpc-ir')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                  radarLayerType === 'dpc-ir'
-                    ? 'bg-teal-700 text-white shadow-md shadow-teal-700/20'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title="IR 10.8 µm satellite — Italy & central Mediterranean, 15-min, high zoom"
-              >
-                <Eye className="w-3.5 h-3.5" />
-                <span>IR</span>
-              </button>
             </div>
           </div>
 
