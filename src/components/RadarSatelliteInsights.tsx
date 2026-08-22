@@ -19,16 +19,16 @@ interface RadarSatelliteSnapshot {
 }
 
 interface RadarSatelliteInsightsProps {
-  layerLabel: string;
-  imageKind: 'radar' | 'satellite';
-  timestamp: Date;
-  ageText: string;
-  locationName: string;
-  dpcPoint: { value: number | null; unit: string; reason: string } | null;
-  dpcApproach: DpcStormApproach | null;
-  dpcCells: DpcRainCell[];
-  dpcPlaybackActive: boolean;
-  dpcProxyConfigured: boolean;
+  layerLabel?: string;
+  imageKind?: 'radar' | 'satellite';
+  timestamp?: Date;
+  ageText?: string;
+  locationName?: string;
+  dpcPoint?: { value: number | null; unit: string; reason: string } | null;
+  dpcApproach?: DpcStormApproach | null;
+  dpcCells?: DpcRainCell[];
+  dpcPlaybackActive?: boolean;
+  dpcProxyConfigured?: boolean;
   satelliteData?: MtgSatelliteDiagnostics;
   currentPrecipitation?: number;
 }
@@ -40,16 +40,16 @@ const getAgeText = (timestamp: Date, ageText: string) => {
 };
 
 export const RadarSatelliteInsights: React.FC<RadarSatelliteInsightsProps> = ({
-  layerLabel,
-  imageKind,
-  timestamp,
-  ageText,
-  locationName,
-  dpcPoint,
-  dpcApproach,
-  dpcCells,
-  dpcPlaybackActive,
-  dpcProxyConfigured,
+  layerLabel = 'Live imagery',
+  imageKind = 'radar',
+  timestamp = new Date(),
+  ageText = '',
+  locationName = 'your location',
+  dpcPoint = null,
+  dpcApproach = null,
+  dpcCells = [],
+  dpcPlaybackActive = false,
+  dpcProxyConfigured = false,
   satelliteData,
   currentPrecipitation = 0
 }) => {

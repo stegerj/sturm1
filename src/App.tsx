@@ -3,7 +3,6 @@ import { Geolocation } from '@capacitor/geolocation';
 import { Navigation } from './components/Navigation';
 import { WeatherView } from './components/WeatherView';
 import { RadarView } from './components/RadarView';
-import { DpcProductControls } from './components/DpcProductControls';
 import { RadarSatelliteInsights } from './components/RadarSatelliteInsights';
 import { SettingsView } from './components/SettingsView';
 import { StormAlertModal } from './components/StormAlertModal';
@@ -195,21 +194,6 @@ export const App: React.FC = () => {
 
         {currentTab === 'radar' && (
           <>
-            <DpcProductControls />
-            <RadarSatelliteInsights
-              layerLabel="Live radar + satellite"
-              imageKind="radar"
-              timestamp={weatherData?.current?.time ? new Date(weatherData.current.time) : new Date()}
-              ageText={weatherData?.current?.time ? 'weather station time' : 'waiting for image timestamp'}
-              locationName={cityName}
-              dpcPoint={null}
-              dpcApproach={null}
-              dpcCells={[]}
-              dpcPlaybackActive={false}
-              dpcProxyConfigured={Boolean(import.meta.env.VITE_DPC_PROXY_URL)}
-              satelliteData={weatherData?.mtgData}
-              currentPrecipitation={weatherData?.current?.precipitation ?? 0}
-            />
             <RadarView
             weatherData={weatherData}
             prediction={prediction}

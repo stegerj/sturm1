@@ -58,6 +58,7 @@ import {
   stripHtml,
   haversineKm
 } from '../services/dpcAlerts';
+import { RadarSatelliteInsights } from './RadarSatelliteInsights';
 import type { DpcBulletin, DpcRainCell, DpcStormApproach } from '../services/dpcAlerts';
 import type { FeatureCollection, Feature } from 'geojson';
 
@@ -439,7 +440,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
       case 'eumetsat-natural':
       case 'eumetsat-ir':
       case 'dwd-sat':
-        return 14; // EUMETSAT MTG-I1 / SEVIRI / DWD WMS Max Zoom
+        // WMS native resolution is ~z14; keep the layer visible (upscaled) at every
+        // zoom so IR/satellite never vanishes on zoom-in — Zoom Earth behaviour.
+        return 18;
       case 'radar':
       default:
         return 18; // RainViewer Doppler Radar with native zoom 12 + client-side upscaling
@@ -1146,7 +1149,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT MTG-I1 / Meteosat-12 True Colour (FCI Full-Disc)',
         zIndex: 350
@@ -1159,7 +1163,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT MTG-I1 Lightning Imager (LI)',
         zIndex: 350
@@ -1172,7 +1177,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT Severe Convective Storms RGB',
         zIndex: 350
@@ -1185,7 +1191,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT MTG-I1 IR 10.5µm Clean Window (FCI High-Resolution)',
         zIndex: 350
@@ -1198,7 +1205,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT Meteosat Natural Colour (15-min feed)',
         zIndex: 350
@@ -1211,7 +1219,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT Meteosat IR 10.8µm (15-min feed)',
         zIndex: 350
@@ -1224,7 +1233,8 @@ export const RadarView: React.FC<RadarViewProps> = ({
         format: 'image/png',
         transparent: true,
         opacity: radarOpacity,
-        maxZoom: 14,
+        maxNativeZoom: 14,
+        maxZoom: 18,
         pane: 'weatherPane',
         attribution: '&copy; EUMETSAT Airmass RGB Composite (15-min feed)',
         zIndex: 350
@@ -1619,141 +1629,286 @@ export const RadarView: React.FC<RadarViewProps> = ({
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              Global radar &amp; satellite + Italy DPC/ARPA radar at street-level zoom
+              All layers in one picker — Europe (RainViewer / EUMETSAT) and Italy (DPC/ARPA), shared playback
             </p>
           </div>
         </div>
 
-        {/* Layer Mode Tabs & Refresh */}
-        <div className="flex items-start gap-2 flex-wrap">
-          {/* Global / European layers */}
-          <div className="flex items-center gap-2 w-full sm:w-auto min-w-0">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 shrink-0">Global</span>
-            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 overflow-x-auto max-w-full">
-            {/* Doppler Radar */}
-            <button
-              onClick={() => selectLayer('radar')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'radar'
-                  ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <CloudRain className="w-3.5 h-3.5" />
-              <span>Rain Radar (dBZ)</span>
-            </button>
+        {/* Layers — one picker: Europe & Italy radar, satellite, refresh */}
+        <div className="flex flex-col gap-3 w-full min-w-0">
+          {/* RADAR group */}
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <div className="flex items-start sm:items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400/80 shrink-0 w-16 pt-2">Radar</span>
+              <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 flex-wrap min-w-0">
+                <span className="px-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 shrink-0">Europe</span>
+                {/* Doppler Radar (RainViewer) */}
+                <button
+                  onClick={() => selectLayer('radar')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'radar'
+                      ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="RainViewer European radar — live 10-min scans plus extrapolated nowcast frames"
+                >
+                  <CloudRain className="w-3.5 h-3.5" />
+                  <span>Rain Radar (dBZ)</span>
+                </button>
 
-            {/* MTG TrueColour GeoColour */}
-            <button
-              onClick={() => selectLayer('mtg-truecolor')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'mtg-truecolor'
-                  ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="Meteosat Third Generation (MTG-I1 / Meteosat-12) True Colour Optical GeoColour"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>MTG TrueColour</span>
-            </button>
+                <span className="px-1.5 text-[9px] font-bold uppercase tracking-wider text-teal-400/90 shrink-0 border-l border-slate-700 ml-1">Italy · DPC/ARPA</span>
 
-            {/* MTG Severe Convection RGB */}
-            <button
-              onClick={() => selectLayer('mtg-convection')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'mtg-convection'
-                  ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="Meteosat Third Generation (MTG-I1) Severe Convective Storms RGB - Overshooting Tops & Updraft Cores"
-            >
-              <Radio className="w-3.5 h-3.5" />
-              <span>MTG Convection</span>
-            </button>
+                {/* DPC live products */}
+                <button
+                  onClick={() => selectLayer('dpc-vmi')}
+                  title="VMI — rain rate · 5 min · five-hour playback"
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-vmi'
+                      ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  VMI
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-sri')}
+                  title="SRI — surface rain · 5 min · five-hour playback"
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-sri'
+                      ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  SRI
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-dbz')}
+                  title="dBZ — reflectivity · live WMS (no playback)"
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-dbz'
+                      ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  dBZ
+                </button>
 
-            {/* MTG Cloud Top Temperatures (CTTH IR) */}
-            <button
-              onClick={() => selectLayer('mtg-cloudtop')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'mtg-cloudtop'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="Meteosat Third Generation Cloud Top Height & Cold Infrared Summit Temperature"
-            >
-              <Cloud className="w-3.5 h-3.5" />
-              <span>MTG Cloud Tops</span>
-            </button>
+                {/* DPC accumulations */}
+                <button
+                  onClick={() => selectLayer('dpc-srt1')}
+                  title="Σ1h — 1-hour accumulation · five-hour playback"
+                  className={`px-2 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-srt1'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  Σ1h
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-srt3')}
+                  title="Σ3h — 3-hour accumulation · five-hour playback"
+                  className={`px-2 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-srt3'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  Σ3h
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-srt6')}
+                  title="Σ6h — 6-hour accumulation · five-hour playback"
+                  className={`px-2 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-srt6'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  Σ6h
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-srt12')}
+                  title="Σ12h — 12-hour accumulation · five-hour playback"
+                  className={`px-2 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-srt12'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  Σ12h
+                </button>
+                <button
+                  onClick={() => selectLayer('dpc-srt24')}
+                  title="Σ24h — 24-hour accumulation · five-hour playback"
+                  className={`px-2 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    radarLayerType === 'dpc-srt24'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  Σ24h
+                </button>
 
-            {/* MTG Lightning Imager (LI) */}
-            <button
-              onClick={() => selectLayer('mtg-li')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'mtg-li'
-                  ? 'bg-yellow-500 text-slate-950 font-black shadow-md shadow-yellow-500/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="Meteosat Third Generation (MTG-I1) Lightning Imager Level-2 Optical Flash Density & Strikes"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              <span>MTG Lightning (LI)</span>
-            </button>
-
-            {/* Live EUMETSAT Natural Colour (15-min) */}
-            <button
-              onClick={() => selectLayer('eumetsat-natural')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'eumetsat-natural'
-                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="European EUMETSAT Meteosat High-Rate 15-Minute Optical & Cloud Feed"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              <span>EUMETSAT Natural</span>
-            </button>
-
-            {/* Live EUMETSAT Thermal IR 10.8µm (24/7 Day/Night) */}
-            <button
-              onClick={() => selectLayer('eumetsat-ir')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'eumetsat-ir'
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="European EUMETSAT Thermal Infrared 10.8µm (Day & Night Cold Cloud Tops)"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              <span>IR 24/7</span>
-            </button>
-
-            {/* DWD European Satellite Composite */}
-            <button
-              onClick={() => selectLayer('dwd-sat')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                radarLayerType === 'dwd-sat'
-                  ? 'bg-slate-700 text-white shadow-md'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="Deutscher Wetterdienst High-Frequency European Satellite Composite"
-            >
-              <span>DWD Sat</span>
-            </button>
+                {/* Nowcast — RainViewer extrapolated forecast */}
+                <button
+                  onClick={() => selectLayer('radar')}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap border ml-1 ${
+                    radarLayerType === 'radar' && isFutureFrame
+                      ? 'bg-sky-500 text-white border-sky-400 shadow-md shadow-sky-500/20'
+                      : 'border-sky-500/25 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
+                  }`}
+                  title="Nowcast — RainViewer extrapolated short-range forecast, shown as future frames in the timeline"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Nowcast</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          <button
-            onClick={() => {
-              loadRadarData();
-              const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
-              if (product && dpcProxyUrl) loadDpcFrames(radarLayerType, false);
-            }}
-            disabled={loadingRadar}
-            className="p-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer disabled:opacity-50 shrink-0"
-            title="Refresh Live Data"
-          >
-            <RefreshCw className={`w-4 h-4 ${loadingRadar ? 'animate-spin text-sky-400' : ''}`} />
-          </button>
+          {/* SATELLITE group */}
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <div className="flex items-start sm:items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400/80 shrink-0 w-16 pt-2">Satellite</span>
+              <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 flex-wrap min-w-0">
+                <span className="px-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 shrink-0">MTG-I1</span>
+
+                {/* MTG TrueColour GeoColour */}
+                <button
+                  onClick={() => selectLayer('mtg-truecolor')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'mtg-truecolor'
+                      ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="MTG-I1 True Colour Optical GeoColour — Meteosat-12, 10-min scan"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>TrueColour</span>
+                </button>
+
+                {/* MTG Severe Convection RGB */}
+                <button
+                  onClick={() => selectLayer('mtg-convection')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'mtg-convection'
+                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="MTG-I1 Severe Convective Storms RGB — overshooting tops & updraft cores"
+                >
+                  <Radio className="w-3.5 h-3.5" />
+                  <span>Convection</span>
+                </button>
+
+                {/* MTG Cloud Top Temperatures (CTTH IR) */}
+                <button
+                  onClick={() => selectLayer('mtg-cloudtop')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'mtg-cloudtop'
+                      ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="MTG-I1 Cloud Top Height & cold infrared summit temperature"
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  <span>Cloud Tops</span>
+                </button>
+
+                {/* MTG Lightning Imager (LI) */}
+                <button
+                  onClick={() => selectLayer('mtg-li')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'mtg-li'
+                      ? 'bg-yellow-500 text-slate-950 font-black shadow-md shadow-yellow-500/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="MTG-I1 Lightning Imager — optical flash density & strikes"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Lightning</span>
+                </button>
+
+                <span className="px-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 shrink-0 border-l border-slate-700 ml-1">Meteosat</span>
+
+                {/* Live EUMETSAT Natural Colour (15-min) */}
+                <button
+                  onClick={() => selectLayer('eumetsat-natural')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'eumetsat-natural'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Meteosat High-Rate 15-minute optical & cloud feed"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>Natural</span>
+                </button>
+
+                {/* Live EUMETSAT Thermal IR 10.8µm (24/7 Day/Night) */}
+                <button
+                  onClick={() => selectLayer('eumetsat-ir')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'eumetsat-ir'
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Meteosat Thermal Infrared 10.8µm — day & night cold cloud tops"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>IR 24/7</span>
+                </button>
+
+                {/* EUMETSAT Airmass RGB */}
+                <button
+                  onClick={() => selectLayer('dwd-sat')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'dwd-sat'
+                      ? 'bg-slate-700 text-white shadow-md'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="EUMETSAT Airmass RGB — jet streams, upper-level vorticity & tropopause folding"
+                >
+                  <span>Airmass</span>
+                </button>
+
+                <span className="px-1.5 text-[9px] font-bold uppercase tracking-wider text-indigo-400/90 shrink-0 border-l border-slate-700 ml-1">Italy</span>
+
+                {/* DPC regional IR */}
+                <button
+                  onClick={() => selectLayer('dpc-ir')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                    radarLayerType === 'dpc-ir'
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="DPC/ARPA regional infrared composite — 15-min · five-hour playback"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>IR</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 justify-between w-full border-t border-slate-800/70 pt-2.5">
+            <span className="text-[10px] text-slate-500 leading-relaxed">
+              Italy products play back the last 5h below the map · Nowcast appears as forecast frames in the timeline
+            </span>
+            <button
+              onClick={() => {
+                loadRadarData();
+                const product = DPC_PLAYBACK_PRODUCT[radarLayerType];
+                if (product && dpcProxyUrl) loadDpcFrames(radarLayerType, false);
+              }}
+              disabled={loadingRadar}
+              className="p-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer disabled:opacity-50 shrink-0"
+              title="Refresh Live Data"
+            >
+              <RefreshCw className={`w-4 h-4 ${loadingRadar ? 'animate-spin text-sky-400' : ''}`} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2206,6 +2361,9 @@ export const RadarView: React.FC<RadarViewProps> = ({
         </div>
       )}
 
+      {/* Radar + satellite insights — live read of the selected image and location */}
+      <RadarSatelliteInsights />
+
       {/* Italy DPC product status — shown when 5h frame history is not available */}
       {DPC_PLAYBACK_PRODUCT[radarLayerType] && frames.length === 0 && (
         <div className="bg-slate-900 border border-amber-500/25 rounded-3xl p-4 sm:p-5 shadow-xl flex flex-wrap items-center justify-between gap-3">
@@ -2372,7 +2530,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
                       ? 'EUMETSAT Meteosat Natural Colour Enhanced (15-min)'
                       : radarLayerType === 'eumetsat-ir'
                       ? 'EUMETSAT Meteosat Thermal IR 10.8µm (24/7 Day/Night)'
-                      : 'DWD European Multi-Channel Satellite Composite'}
+                      : 'EUMETSAT Airmass RGB Composite (15-min)'}
                   </span>
                   <span className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                     {isMtg ? '10-min MTG FCI Scan' : '15-min SEVIRI Scan'}
