@@ -106,9 +106,9 @@ export const RadarSatelliteInsights: React.FC<RadarSatelliteInsightsProps> = ({
           <div className="p-2.5 rounded-2xl bg-sky-500/10 border border-sky-500/20 text-sky-300"><Activity className="w-5 h-5" /></div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <h3 id="radar-satellite-insights-title" className="text-sm sm:text-base font-bold text-white">Radar + satellite insights</h3>
-              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/25">Image-first</span>
-            </div>              <p className="text-xs text-slate-400 mt-0.5">A quick read of the latest image and location context around {activeLocationName}.</p>
+              <h3 id="radar-satellite-insights-title" className="text-sm sm:text-base font-bold text-white">Image interpretation</h3>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/25">Observed + derived</span>
+            </div>              <p className="text-xs text-slate-400 mt-0.5">A concise explanation of what the selected image says around {activeLocationName}.</p>
 
           </div>
         </div>

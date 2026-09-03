@@ -10,13 +10,34 @@ import { WeatherResponse, StormRisk, StormPredictionResponse, AppSettings } from
 import type { DpcStormApproach } from './services/dpcAlerts';
 import { fetchCurrentWeather, analyzeStormRisk, generateStormPrediction } from './services/weatherApi';
 
+const APP_STATE_KEY = 'storm-alert:app-state:v1';
+
+type PersistedAppState = {
+  currentTab?: 'weather' | 'radar' | 'settings';
+  lat?: number;
+  lon?: number;
+  cityName?: string;
+  settings?: Partial<AppSettings>;
+};
+
+function readPersistedState(): PersistedAppState | null {
+  try {
+    const raw = localStorage.getItem(APP_STATE_KEY);
+    return raw ? JSON.parse(raw) as PersistedAppState : null;
+  } catch {
+    return null;
+  }
+}
+
+const persistedState = readPersistedState();
+
 export const App: React.FC = () => {
-  const [currentTab, setCurrentTab] = useState<'weather' | 'radar' | 'settings'>('weather');
+  const [currentTab, setCurrentTab] = useState<'weather' | 'radar' | 'settings'>(persistedState?.currentTab ?? 'weather');
 
   // Location State
-  const [lat, setLat] = useState<number>(59.9139);
-  const [lon, setLon] = useState<number>(10.7522);
-  const [cityName, setCityName] = useState<string>('Oslo, Norway');
+  const [lat, setLat] = useState<number>(persistedState?.lat ?? 59.9139);
+  const [lon, setLon] = useState<number>(persistedState?.lon ?? 10.7522);
+  const [cityName, setCityName] = useState<string>(persistedState?.cityName ?? 'Oslo, Norway');
 
   // Weather & Risk State
   const [weatherData, setWeatherData] = useState<WeatherResponse | null>(null);
@@ -31,8 +52,9 @@ export const App: React.FC = () => {
     alertThreshold: 50,
     checkInterval: 15,
     serviceRunning: true,
-    selectedCity: 'Oslo, Norway',
-    language: 'auto'
+    selectedCity: persistedState?.settings?.selectedCity ?? persistedState?.cityName ?? 'Oslo, Norway',
+    language: 'auto',
+    ...persistedState?.settings
   });
 
   const [isAlertModalOpen, setIsAlertModalOpen] = useState<boolean>(false);
@@ -66,10 +88,21 @@ export const App: React.FC = () => {
     }
   }, [settings.enableAlerts, settings.alertThreshold]);
 
-  // Initial load - automatically request location or load weather
+  // GPS remains the startup source for local conditions. Saved settings still restore below.
   useEffect(() => {
     handleUseGeolocation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(APP_STATE_KEY, JSON.stringify({
+        currentTab, lat, lon, cityName, settings
+      } satisfies PersistedAppState));
+    } catch {
+      // Storage can be unavailable in private browsing; the app remains usable.
+    }
+  }, [currentTab, lat, lon, cityName, settings]);
 
   // Geolocation Handler
   const handleUseGeolocation = async () => {

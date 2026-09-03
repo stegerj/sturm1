@@ -399,7 +399,30 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         />
       )}
 
-      {/* 2. CLASSIC WEATHER HERO CARD (Clean, High-Readability, Standard Metrics First) */}
+      {/* 2. DECISION-FIRST RISK SUMMARY */}
+      {stormRisk && (
+        <section className={`rounded-3xl border p-4 sm:p-5 shadow-xl ${
+          stormRisk.overallRiskScore >= 75 ? 'bg-red-950/40 border-red-500/40' :
+          stormRisk.overallRiskScore >= 45 ? 'bg-amber-950/30 border-amber-500/35' :
+          'bg-emerald-950/25 border-emerald-500/25'
+        }`} aria-labelledby="local-risk-title">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className={`p-2.5 rounded-2xl ${stormRisk.overallRiskScore >= 75 ? 'bg-red-500/15 text-red-300' : stormRisk.overallRiskScore >= 45 ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/15 text-emerald-300'}`}>
+                {stormRisk.overallRiskScore >= 45 ? <ShieldAlert className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-black text-slate-400">Local weather risk</div>
+                <h2 id="local-risk-title" className="text-xl font-black text-white mt-0.5">{stormRisk.severityCategory} · {stormRisk.overallRiskScore}%</h2>
+                <p className="text-sm text-slate-300 mt-1">{stormRisk.isStormApproaching ? `Storm activity may arrive in about ${stormRisk.estimatedTimeToStorm} minutes.` : stormRisk.isCurrentlyStormy ? 'Active storm conditions are being observed nearby.' : 'No immediate severe-weather signal at your location.'}</p>
+              </div>
+            </div>
+            <button onClick={onCheckStormAlerts} className="px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700 text-xs font-bold text-slate-200 hover:border-sky-400 hover:text-white transition-all cursor-pointer">View alert details</button>
+          </div>
+        </section>
+      )}
+
+      {/* 3. CLASSIC WEATHER HERO CARD (Clean, High-Readability, Standard Metrics First) */}
       <div
         className={`relative overflow-hidden rounded-3xl p-6 sm:p-8 border shadow-2xl transition-all ${
           condition.isStormy
@@ -591,7 +614,7 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         )}
       </div>
 
-      {/* 3. 24-HOUR FORECAST (High-Fidelity Interactive Line Graph with Felt Temperature) */}
+      {/* 4. 24-HOUR FORECAST (High-Fidelity Interactive Line Graph with Felt Temperature) */}
       {weatherData.hourly && (() => {
         const temps = hourlyItems.map((h) => h.temp);
         const apparentTemps = hourlyItems.map((h) => h.apparentTemp);
@@ -1006,7 +1029,7 @@ export const WeatherView: React.FC<WeatherViewProps> = ({
         );
       })()}
 
-      {/* 4. 7-DAY EXTENDED FORECAST (Clean Vertical Stack) */}
+      {/* 5. 7-DAY EXTENDED FORECAST (Clean Vertical Stack) */}
       {weatherData.daily && (() => {
         const forecastMin = (weatherData.daily.temperatureMin || []).slice(1);
         const forecastMax = (weatherData.daily.temperatureMax || []).slice(1);
