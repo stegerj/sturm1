@@ -72,7 +72,7 @@ interface RadarViewProps {
   onDpcStormApproaching?: (info: DpcStormApproach) => void;
 }
 
-type MapTheme = 'dark' | 'streets' | 'satellite';
+type MapTheme = 'dark' | 'streets';
 type RadarLayerType =
   | 'radar'
   | 'mtg-truecolor'
@@ -817,8 +817,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
         return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
       case 'streets':
         return 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-      case 'satellite':
-        return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
       default:
         return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
     }
@@ -1034,7 +1032,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
     // 2. High-Contrast City & Region Labels Overlay (above contours)
     if (showLabels) {
-      const labelsUrl = mapTheme === 'satellite'
+      const labelsUrl = mapTheme === 'dark'
         ? 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
         : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png';
 
@@ -2132,14 +2130,6 @@ export const RadarView: React.FC<RadarViewProps> = ({
               }`}
             >
               Dark
-            </button>
-            <button
-              onClick={() => setMapTheme('satellite')}
-              className={`px-2.5 py-1 rounded-xl transition-all font-medium cursor-pointer ${
-                mapTheme === 'satellite' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Hybrid
             </button>
             <button
               onClick={() => setMapTheme('streets')}
