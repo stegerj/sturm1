@@ -810,15 +810,18 @@ export const RadarView: React.FC<RadarViewProps> = ({
     };
   }, [radarLayerType, dpcPlaybackActive, frames, weatherData?.latitude, weatherData?.longitude]);
 
-  // Base map URL generator
+  // Base map URL generator.
+  // Esri Gray Canvas / Street Map tiles: keyless, no account, no "API key required"
+  // watermark (CARTO's free CDN now serves key-gated watermark tiles).
+  // Note the Esri tile scheme is /tile/{z}/{y}/{x} (row before column).
   const getBaseMapUrl = (theme: MapTheme) => {
     switch (theme) {
       case 'dark':
-        return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+        return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
       case 'streets':
-        return 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+        return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
       default:
-        return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+        return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
     }
   };
 
@@ -869,7 +872,7 @@ export const RadarView: React.FC<RadarViewProps> = ({
 
     // Base tile layer
     const baseLayer = L.tileLayer(getBaseMapUrl(mapTheme), {
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      attribution: '&copy; Esri, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors',
       maxZoom: 18
     }).addTo(map);
     baseTileLayerRef.current = baseLayer;
@@ -1033,15 +1036,15 @@ export const RadarView: React.FC<RadarViewProps> = ({
     // 2. High-Contrast City & Region Labels Overlay (above contours)
     if (showLabels) {
       const labelsUrl = mapTheme === 'dark'
-        ? 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png';
+        ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}'
+        : 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
 
       const labelsLayer = L.tileLayer(labelsUrl, {
         maxZoom: 18,
         pane: 'labelsPane',
         zIndex: 500,
         opacity: 1.0,
-        attribution: '&copy; CARTO'
+        attribution: '&copy; Esri'
       }).addTo(mapInstanceRef.current);
       labelsTileLayerRef.current = labelsLayer;
     }
